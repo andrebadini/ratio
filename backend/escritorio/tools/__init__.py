@@ -1,1 +1,1 @@
-"""Tools do Ratio Escritorio."""
+"""Tools do DataJus Escritorio."""

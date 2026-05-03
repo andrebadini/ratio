@@ -186,7 +186,7 @@ def init_db() -> sqlite3.Connection:
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Ratio-Jurisprudencial/1.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DataJus-Jurisprudencial/1.0",
     "Accept-Language": "pt-BR,pt;q=0.9",
 })
 

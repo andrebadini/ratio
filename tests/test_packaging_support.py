@@ -30,7 +30,7 @@ def test_readme_documents_windows_exe_distribution_flow():
     readme = _read("README.md")
 
     assert "Build executavel .exe (Windows)" in readme
-    assert "dist\\Ratio\\Ratio.exe" in readme
+    assert "dist\\DataJus\\DataJus.exe" in readme
     assert "nao precisa de Python" in readme
 
 

@@ -1,6 +1,6 @@
-﻿# Contributing to Ratio
+﻿# Contributing to DataJus
 
-Obrigado por contribuir com o Ratio.
+Obrigado por contribuir com o DataJus.
 
 ## 1. Antes de comecar
 

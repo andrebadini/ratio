@@ -234,7 +234,7 @@ def main() -> int:
         print("[ERRO] Base jurisprudencial LanceDB nao encontrada.")
         print(f"Tentado: {PROJECT_ROOT / 'lancedb_store' / 'jurisprudencia.lance'}")
         print(f"Tentado: {PROJECT_ROOT / '_internal' / 'lancedb_store' / 'jurisprudencia.lance'}")
-        print("Inclua a pasta lancedb_store ao lado do Ratio.exe e tente novamente.")
+        print("Inclua a pasta lancedb_store ao lado do DataJus.exe e tente novamente.")
         return 5
 
     frontend_server: ThreadingHTTPServer | None = None
@@ -271,7 +271,7 @@ def main() -> int:
                 print("[ERRO] Backend encerrou inesperadamente.")
                 return 4
     except KeyboardInterrupt:
-        print("\nEncerrando Ratio...")
+        print("\nEncerrando DataJus...")
         return 0
     finally:
         if backend_server is not None:

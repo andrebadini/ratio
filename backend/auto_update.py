@@ -1,4 +1,4 @@
-"""Lightweight auto-update system for Ratio.
+"""Lightweight auto-update system for DataJus.
 
 Checks GitHub Releases for a newer version manifest, downloads only the
 changed files, and atomically swaps them into place.  The user restarts
@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-GITHUB_REPO = "carlosvictorodrigues/ratio"
+GITHUB_REPO = os.getenv("DATAJUS_UPDATE_REPO", "")
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 MANIFEST_ASSET_NAME = "update-manifest.json"
 CHECK_COOLDOWN_S = 3600  # 1 hour
@@ -101,12 +102,14 @@ def check_for_update(
     project_root: Path,
     last_check_ts: float,
 ) -> dict[str, Any]:
-    """Check GitHub Releases for a newer version. Safe to call often — respects cooldown."""
+    """Check the configured release repository for a newer version. Safe to call often."""
     now = time.time()
     if last_check_ts and (now - last_check_ts) < CHECK_COOLDOWN_S:
         return {"available": False, "reason": "cooldown"}
 
     local = load_local_version(project_root)
+    if not GITHUB_REPO:
+        return {"available": False, "reason": "update_repo_not_configured", **local}
 
     try:
         with httpx.Client(timeout=12, follow_redirects=True) as client:
@@ -114,7 +117,7 @@ def check_for_update(
                 GITHUB_API_LATEST,
                 headers={
                     "Accept": "application/vnd.github+json",
-                    "User-Agent": "Ratio-AutoUpdate/1.0",
+                    "User-Agent": "DataJus-AutoUpdate/1.0",
                 },
             )
             if resp.status_code == 404:
@@ -276,14 +279,14 @@ def apply_update(
 
 
 def schedule_restart(project_root: Path, delay_s: float = 1.5) -> dict[str, Any]:
-    """Schedule an app restart by spawning a new Ratio.exe and exiting.
+    """Schedule an app restart by spawning a new DataJus.exe and exiting.
 
     Works on Windows by launching a detached process that waits briefly
-    for the current process to exit, then starts Ratio.exe again.
+    for the current process to exit, then starts DataJus.exe again.
     """
-    exe = project_root / "Ratio.exe"
+    exe = project_root / "DataJus.exe"
     if not exe.exists():
-        return {"status": "error", "detail": "Ratio.exe nao encontrado."}
+        return {"status": "error", "detail": "DataJus.exe nao encontrado."}
 
     # On Windows: use a small cmd script that waits, then re-launches.
     # On other platforms (dev): use a direct subprocess.

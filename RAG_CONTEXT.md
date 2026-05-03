@@ -1,4 +1,4 @@
-﻿# Ratio - RAG Project Context & Status
+﻿# DataJus - RAG Project Context & Status
 
 Este repositÃ³rio contÃ©m um sistema **RAG (Retrieval-Augmented Generation)** construÃ­do para realizar buscas semÃ¢nticas mistas sobre uma base consolidada da JurisprudÃªncia do STF e STJ, gerando respostas fundamentadas com a API do **Gemini**.
 

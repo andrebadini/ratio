@@ -4,7 +4,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo ============================================================
-echo Ratio - Build executavel Windows
+echo DataJus - Build executavel Windows
 echo ============================================================
 echo.
 
@@ -22,7 +22,7 @@ echo [INFO] Python selecionado: %PY_VERSION%
 
 set "DB_SOURCE=%CD%\lancedb_store"
 set "DB_SOURCE_TABLE=%DB_SOURCE%\jurisprudencia.lance"
-set "DIST_DB=%CD%\dist\Ratio\lancedb_store"
+set "DIST_DB=%CD%\dist\DataJus\lancedb_store"
 set "DIST_DB_TABLE=%DIST_DB%\jurisprudencia.lance"
 set "DB_BACKUP_ROOT=%CD%\build\database_backups"
 set "PLAYWRIGHT_BROWSERS_DIR=%CD%\_playwright_browsers"
@@ -66,14 +66,14 @@ if errorlevel 1 (
 echo [3/4] Limpando artefatos antigos...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-if exist Ratio.spec del /q Ratio.spec
+if exist DataJus.spec del /q DataJus.spec
 
-echo [4/4] Gerando dist\Ratio\Ratio.exe ...
+echo [4/4] Gerando dist\DataJus\DataJus.exe ...
 %PY_CMD% -m PyInstaller ^
   --noconfirm ^
   --clean ^
   --onedir ^
-  --name Ratio ^
+  --name DataJus ^
   --icon "frontend\favicon.ico" ^
   --add-data "frontend;frontend" ^
   --add-data "_playwright_browsers;_playwright_browsers" ^
@@ -91,10 +91,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [INFO] Copiando lancedb_store para dist\Ratio...
+echo [INFO] Copiando lancedb_store para dist\DataJus...
 robocopy "%DB_SOURCE%" "%DIST_DB%" /E /R:1 /W:1 /NFL /NDL /NJH /NJS >nul
 if errorlevel 8 (
-  echo [ERRO] Falha ao copiar lancedb_store para dist\Ratio.
+  echo [ERRO] Falha ao copiar lancedb_store para dist\DataJus.
   exit /b 1
 )
 
@@ -106,13 +106,13 @@ if not exist "%DIST_DB_TABLE%" (
 
 echo.
 echo Build concluido.
-echo Executavel: dist\Ratio\Ratio.exe
+echo Executavel: dist\DataJus\DataJus.exe
 echo.
-echo Banco de dados incluso: dist\Ratio\lancedb_store\
+echo Banco de dados incluso: dist\DataJus\lancedb_store\
 echo Backup local (quando aplicavel): build\database_backups\
 echo.
 echo IMPORTANTE:
-echo 1) Copie .env para dist\Ratio\ (ou configure pela tela inicial)
-echo 2) Execute apenas o arquivo Ratio.exe
+echo 1) Copie .env para dist\DataJus\ (ou configure pela tela inicial)
+echo 2) Execute apenas o arquivo DataJus.exe
 echo.
 exit /b 0

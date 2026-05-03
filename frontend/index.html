@@ -3,16 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Ratio</title>
+  <title>DataJus</title>
   <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32x32.png" />
   <link rel="icon" type="image/png" sizes="48x48" href="./favicon-48x48.png" />
   <link rel="icon" href="./favicon.ico" />
   <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
   <meta name="msapplication-TileImage" content="./icon-192.png" />
-  <meta property="og:title" content="Ratio - Pesquisa Jurisprudencial" />
+  <meta property="og:title" content="DataJus - Pesquisa Jurisprudencial" />
   <meta property="og:description" content="Pesquisa jurisprudencial local para STF/STJ com RAG e citacoes rastreaveis." />
   <meta property="og:image" content="./og-image.png" />
-  <meta property="og:image:alt" content="Icone de balanca da justica em preto - Ratio" />
+  <meta property="og:image:alt" content="Icone de balanca da justica em preto - DataJus" />
   <meta property="og:type" content="website" />
   <meta name="twitter:card" content="summary_large_image" />
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.2/marked.min.js" integrity="sha384-jJWlCM+rFWSQruX9AsLlEfjF73FlUiTSl2t1tnq+EZPHdFHIoUBmX0mlKgDocb9G" crossorigin="anonymous"></script>
@@ -20,10 +20,38 @@
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js" integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="./styles.css" />
 </head>
-<body data-settings-open="false" data-acervo-open="false" data-evidence-open="true" data-library-open="false" data-onboarding-open="false" data-about-open="false" data-tips-open="false" data-support-open="false">
+<body data-auth-open="true" data-settings-open="false" data-acervo-open="false" data-evidence-open="true" data-library-open="false" data-onboarding-open="false" data-about-open="false" data-tips-open="false" data-support-open="false">
   <div id="overlay" class="overlay"></div>
 
-  <section id="supportModal" class="support-modal panel-shell" role="dialog" aria-modal="true" aria-labelledby="supportTitle">
+  <section id="authModal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="auth-card panel-shell">
+      <div class="auth-card-mark" aria-hidden="true">
+        <i data-lucide="scale"></i>
+      </div>
+      <div class="auth-card-head">
+        <h2 id="authTitle">Entrar no DataJus</h2>
+        <p>Use um usuário previamente autorizado nesta instalação.</p>
+      </div>
+      <div class="auth-body">
+        <label class="field">
+          <span>Usuário ou email</span>
+          <input id="authUsernameInput" type="text" autocomplete="username" placeholder="seu@email.com" />
+        </label>
+        <label class="field">
+          <span>Senha</span>
+          <input id="authPasswordInput" type="password" autocomplete="current-password" placeholder="Sua senha" />
+        </label>
+        <div class="auth-actions">
+          <button id="authLoginBtn" class="chip-btn auth-primary-btn" type="button">Entrar</button>
+          <button id="authRegisterBtn" class="meta-btn auth-secondary-btn" type="button">Criar senha</button>
+        </div>
+        <p class="auth-footnote">As chaves de API ficam salvas apenas para este usuário.</p>
+        <p id="authStatus" class="rag-config-status"></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="supportModal" class="support-modal panel-shell" role="dialog" aria-modal="true" aria-labelledby="supportTitle" hidden>
     <div class="support-modal-accent"></div>
     <button id="closeSupportBtn" class="support-close-btn icon-btn" type="button" aria-label="Fechar">
       <i data-lucide="x"></i>
@@ -31,30 +59,12 @@
     <div class="support-modal-body">
       <div class="support-modal-header" data-support-stagger="1">
         <i data-lucide="heart" class="support-heart-icon"></i>
-        <h2 id="supportTitle" class="support-title">Apoie o Ratio</h2>
-        <p class="support-lead">Projeto open-source gratuito. Seu apoio ajuda a manter e evoluir a plataforma.</p>
-      </div>
-      <div class="support-pix-area" data-support-stagger="2">
-        <div class="support-qr-frame">
-          <img class="support-qr-img" src="./apoio-pix.jpeg" alt="QR code de apoio via PIX ao projeto Ratio" loading="eager" />
-        </div>
-        <div class="support-pix-key-area">
-          <span class="support-pix-label">Chave PIX copia-e-cola</span>
-          <p id="supportPixKeyText" class="support-pix-key">00020126920014BR.GOV.BCB.PIX013607cdc77f-cd4b-44b8-a910-a254f58642f40230Apoie o Ratio - Jurisprudencia5204000053039865802BR5925Carlos Victor de Oliveira6009SAO PAULO621405102qCvdJp89F6304E670</p>
-          <button id="copySupportPixBtn" class="support-copy-btn" type="button">
-            <i data-lucide="copy"></i>
-            Copiar chave PIX
-          </button>
-        </div>
+        <h2 id="supportTitle" class="support-title">DataJus</h2>
+        <p class="support-lead">Pesquisa jurisprudencial local com RAG e citações rastreáveis.</p>
       </div>
       <div class="support-modal-footer" data-support-stagger="3">
-        <div class="support-contact">
-          <a href="https://instagram.com/carlosvictorodrigues" target="_blank" rel="noopener noreferrer">@carlosvictorodrigues</a>
-          <span class="support-contact-sep"></span>
-          <a href="mailto:contato@ratiojuris.me">contato@ratiojuris.me</a>
-        </div>
         <button id="dismissSupportBtn" class="support-dismiss-btn" type="button">
-          Continuar para o Ratio
+          Continuar para o DataJus
           <i data-lucide="arrow-right"></i>
         </button>
       </div>
@@ -63,64 +73,69 @@
 
   <section id="onboardingModal" class="onboarding-modal panel-shell" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
     <div class="panel-head">
-      <h2 id="onboardingTitle">Primeiros passos com API Gemini</h2>
+      <h2 id="onboardingTitle">Primeiros passos com provedores de IA</h2>
       <button id="closeOnboardingBtn" class="icon-btn" type="button" aria-label="Fechar guia inicial">
         <i data-lucide="x"></i>
       </button>
     </div>
     <div class="onboarding-body">
       <p class="onboarding-lead">
-        Para usar o Ratio com busca e sintese completas, configure sua chave Gemini e confira custos/cotas antes da primeira consulta.
+        Entre com seu usuario autorizado. O DataJus ja vem com MiniMax-M2.7-highspeed como padrao; para outros provedores, informe apenas a API key.
       </p>
       <div class="onboarding-key-setup">
         <label class="field">
-          <span>Chave Gemini (obrigatoria)</span>
+          <span>Provedor inicial</span>
+          <select id="onboardingProviderSelect">
+            <option value="minimax">MiniMax</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="claude">Claude (Anthropic)</option>
+            <option value="gemini">Gemini</option>
+          </select>
+        </label>
+        <label class="field">
+          <span id="onboardingApiKeyLabel">Chave do provedor</span>
           <input id="onboardingApiKeyInput" type="password" autocomplete="off" placeholder="Cole aqui sua API key" />
         </label>
         <div class="onboarding-key-actions">
-          <label class="onboarding-persist-row">
-            <input id="onboardingPersistEnv" type="checkbox" checked />
-            <span>Salvar em <code>.env</code> automaticamente</span>
-          </label>
           <button id="onboardingSaveKeyBtn" class="chip-btn" type="button">Validar e salvar chave</button>
         </div>
-        <p id="onboardingKeyStatus" class="onboarding-key-status">Sem chave Gemini ativa detectada ainda.</p>
+        <p id="onboardingKeyStatus" class="onboarding-key-status">MiniMax highspeed funciona com a chave global da instalacao. Para outros provedores, salve sua chave pessoal.</p>
       </div>
       <ol class="onboarding-steps">
         <li>
-          Abra o <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a> e gere a chave em <strong>Create API key</strong>.
+          Escolha o provedor de geração: MiniMax, OpenAI, DeepSeek, Claude ou Gemini.
         </li>
         <li>
-          Se preferir manual, copie <code>.env.example</code> para <code>.env</code> e preencha:
-          <pre>GEMINI_API_KEY=sua_chave_aqui</pre>
+          Informe somente a API key quando quiser usar um provedor que nao seja o MiniMax padrao global.
         </li>
         <li>
-          Inicie o backend/frontend e rode uma consulta curta para validar.
+          Modelos, endpoints, embeddings e TTS sao selecionados em listas predefinidas pelo catalogo da aplicacao.
         </li>
       </ol>
 
-      <div class="onboarding-subhead">Custos e cota gratuita (snapshot 24/02/2026)</div>
+      <div class="onboarding-subhead">Presets principais</div>
       <div class="cost-grid">
         <article class="cost-card">
-          <h3>gemini-3.1-pro-preview</h3>
-          <p>Sem cota gratuita.</p>
-          <p>Entrada: US$ 2.00 (ate 200k) / US$ 4.00 (&gt; 200k) por 1M tokens.</p>
-          <p>Saida: US$ 12.00 (ate 200k) / US$ 18.00 (&gt; 200k) por 1M tokens.</p>
+          <h3>MiniMax</h3>
+          <p>Padrao: MiniMax-M2.7-highspeed.</p>
+          <p>Topo: MiniMax-M2.7.</p>
+          <p>TTS: speech-2.8-hd e speech-2.8-turbo.</p>
         </article>
         <article class="cost-card">
-          <h3>gemini-2.5-flash</h3>
-          <p>Com cota gratuita (limites variam por conta/tier).</p>
-          <p>Entrada: US$ 0.30 (ate 200k) / US$ 0.60 (&gt; 200k) por 1M tokens.</p>
-          <p>Saida: US$ 2.50 (ate 200k) / US$ 3.50 (&gt; 200k) por 1M tokens.</p>
+          <h3>OpenAI e Claude</h3>
+          <p>OpenAI: gpt-5.2 e gpt-5-mini.</p>
+          <p>Claude: opus, sonnet e haiku atuais do catalogo.</p>
+          <p>Chaves pessoais ficam isoladas por usuario.</p>
         </article>
         <article class="cost-card">
-          <h3>gemini-2.5-pro</h3>
-          <p>Com cota gratuita (limites variam por conta/tier).</p>
-          <p>Entrada e saida: consulte a tabela oficial para seu tier atual.</p>
-          <p>No seu painel, limite exibido: ~1.000 req/dia (RPD).</p>
+          <h3>DeepSeek e Gemini</h3>
+          <p>DeepSeek: deepseek-v4-pro e deepseek-v4-flash.</p>
+          <p>Gemini: modelos pro/flash, embedding e TTS nativo.</p>
+          <p>Endpoints sao aplicados automaticamente.</p>
         </article>
       </div>
-      <div class="onboarding-subhead">Tradução de custo por fluxo de requisicoes por consulta</div>
+      <div class="onboarding-subhead">Fluxo por consulta</div>
       <div class="cost-grid request-impact-grid">
         <article class="cost-card">
           <h3>Reranker local</h3>
@@ -129,55 +144,33 @@
           <p>Explicar/Ler em voz alta adiciona novas requisicoes sob demanda.</p>
         </article>
         <article class="cost-card">
-          <h3>Reranker Gemini</h3>
+          <h3>Reranker remoto</h3>
           <p>1 requisicao de embedding da pergunta.</p>
-          <p>Multiplas requisicoes Gemini para rerank por lote (custo maior).</p>
+          <p>Multiplas requisicoes ao modelo de rerank por lote (custo maior).</p>
           <p>1 requisicao de geracao final + fallback eventual.</p>
         </article>
         <article class="cost-card">
           <h3>Leitura pratica</h3>
           <p>Quanto maior top-k, contexto e modelo, maior consumo por consulta.</p>
-          <p>Com reranker local, o custo Gemini tende a cair por consulta.</p>
-          <p>Use o painel de rate limits para confirmar sua cota gratuita ativa.</p>
-        </article>
-      </div>
-      <div class="onboarding-subhead">Estimativa por pergunta no Ratio (pratico)</div>
-      <div class="cost-grid request-impact-grid">
-        <article class="cost-card">
-          <h3>Tokens tipicos por pergunta</h3>
-          <p>Consulta curta: ~3k a 7k tokens de entrada (contexto + pergunta).</p>
-          <p>Resposta media: ~600 a 1.600 tokens de saida.</p>
-          <p>Faixa total comum: ~3.6k a 8.6k tokens por resposta.</p>
-        </article>
-        <article class="cost-card">
-          <h3>Se usar modelo pago (ex.: gemini-3.1-pro-preview)</h3>
-          <p>Custo aproximado por pergunta: ~US$ 0.02 a US$ 0.05.</p>
-          <p>Depende de: tamanho do contexto, top-k, tokens de saida e fallback.</p>
-          <p>Reranker Gemini aumenta custo por adicionar chamadas extras.</p>
-        </article>
-        <article class="cost-card">
-          <h3>Se usar 2.5-pro free tier</h3>
-          <p>No seu painel (snapshot): 3.1-pro ~250 RPD, 2.5-pro ~1.000 RPD, 2.5-flash ~10.000 RPD.</p>
-          <p>Com reranker local: em geral ~1 pergunta ~= 1 requisicao de geracao.</p>
-          <p>Com reranker Gemini: 1 pergunta pode consumir varias requisicoes de texto.</p>
+          <p>Com reranker local, o custo remoto tende a cair por consulta.</p>
+          <p>Use o painel do provedor para confirmar cota, limites e billing.</p>
         </article>
       </div>
       <p class="onboarding-footnote">
-        Limites de RPM/TPM/RPD variam por modelo e tier (e podem mudar sem aviso). Confira seus limites ativos no painel oficial de
-        <a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noopener noreferrer">Rate limits</a>.
+        Limites, disponibilidade de modelos e precos variam por conta e podem mudar. Confira sempre o painel oficial do provedor selecionado.
       </p>
       <div class="onboarding-links">
-        <a class="meta-btn" href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noopener noreferrer">
+        <a class="meta-btn" href="https://platform.minimax.io/docs/api-reference/api-overview" target="_blank" rel="noopener noreferrer">
           <i data-lucide="key-round"></i>
-          Guia de API key
+          MiniMax API
         </a>
-        <a class="meta-btn" href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noopener noreferrer">
+        <a class="meta-btn" href="https://developers.openai.com/api/docs/guides/text-to-speech" target="_blank" rel="noopener noreferrer">
           <i data-lucide="badge-dollar-sign"></i>
-          Tabela oficial de preco
+          OpenAI API
         </a>
-        <a class="meta-btn" href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer">
+        <a class="meta-btn" href="https://platform.claude.com/docs/en/about-claude/models/overview" target="_blank" rel="noopener noreferrer">
           <i data-lucide="receipt-text"></i>
-          Billing e upgrade
+          Claude models
         </a>
       </div>
       <div class="onboarding-actions">
@@ -188,7 +181,7 @@
 
   <section id="aboutModal" class="about-modal panel-shell" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
     <div class="panel-head">
-      <h2 id="aboutTitle">Sobre o Ratio</h2>
+      <h2 id="aboutTitle">Sobre o DataJus</h2>
       <button id="closeAboutBtn" class="icon-btn" type="button" aria-label="Fechar sobre">
         <i data-lucide="x"></i>
       </button>
@@ -197,12 +190,12 @@
       <nav id="aboutTabs" class="about-tabs" role="tablist" aria-label="Secoes sobre o projeto">
         <button class="about-tab active" type="button" role="tab" aria-selected="true" data-about-tab-target="acervo">Sobre o acervo</button>
         <button class="about-tab" type="button" role="tab" aria-selected="false" data-about-tab-target="estrutura">Estrutura documental</button>
-        <button class="about-tab" type="button" role="tab" aria-selected="false" data-about-tab-target="autor">Sobre o autor e apoio</button>
+        <button class="about-tab" type="button" role="tab" aria-selected="false" data-about-tab-target="autor">Privacidade</button>
       </nav>
 
       <section class="about-pane active" data-about-pane="acervo">
         <p class="about-pane-lead">
-          O Ratio indexa jurisprudencia em escala ampla para busca semantica local, com trilha de citacao verificavel.
+          O DataJus indexa jurisprudencia em escala ampla para busca semantica local, com trilha de citacao verificavel.
         </p>
         <div class="about-stats-grid">
           <article class="about-stat-card">
@@ -297,23 +290,12 @@
 
       <section class="about-pane" data-about-pane="autor">
         <p class="about-pane-lead">
-          Ratio e um projeto open-source, gratuito e independente, criado para apoiar estudantes e profissionais do Direito que hoje nao podem assumir assinaturas pagas. Se fizer sentido para voce, seu apoio ajuda a manter e evoluir a plataforma.
+          O DataJus pode operar com provedores externos de LLM, TTS e embeddings. Revise a política de privacidade e os termos de cada provedor antes de enviar dados sensíveis.
         </p>
         <div class="author-grid">
           <article class="author-card">
-            <h3>Contato</h3>
-            <p><strong>Instagram:</strong> @carlosvictorodrigues</p>
-            <p><strong>E-mail:</strong> contato@ratiojuris.me</p>
-          </article>
-          <article class="author-card author-card-support">
-            <h3>Apoio via PIX</h3>
-            <div class="pix-support-layout">
-              <img class="pix-qr" src="./apoio-pix.jpeg" alt="QR code de apoio via PIX ao projeto Ratio" loading="lazy" />
-              <div class="pix-key-block">
-                <p id="pixKeyText" class="pix-key-text">00020126920014BR.GOV.BCB.PIX013607cdc77f-cd4b-44b8-a910-a254f58642f40230Apoie o Ratio - Jurisprudencia5204000053039865802BR5925Carlos Victor de Oliveira6009SAO PAULO621405102qCvdJp89F6304E670</p>
-                <button id="copyPixKeyBtn" class="chip-btn" type="button">Copiar chave PIX</button>
-              </div>
-            </div>
+            <h3>Execução local</h3>
+            <p>O acervo e o reranker local ficam na máquina. Chamadas externas acontecem apenas quando um provedor de nuvem é selecionado.</p>
           </article>
         </div>
       </section>
@@ -357,7 +339,7 @@
       </div>
       <div class="tips-tab-pane" data-tips-pane="parametros">
         <p class="tips-modal-lead">
-          Os parâmetros ajustam como o Ratio busca e seleciona precedentes. Na maioria dos casos, os valores padrão funcionam bem.
+          Os parâmetros ajustam como o DataJus busca e seleciona precedentes. Na maioria dos casos, os valores padrão funcionam bem.
         </p>
         <div class="tips-modal-block">
           <p class="tips-section">Candidatos Híbridos</p>
@@ -422,7 +404,7 @@
       <button class="rail-btn" type="button" data-library-mode="saved" aria-label="Consultas salvas">
         <i data-lucide="bookmark"></i>
       </button>
-      <button class="rail-btn" type="button" data-open-about aria-label="Sobre o Ratio">
+      <button class="rail-btn" type="button" data-open-about aria-label="Sobre o DataJus">
         <i data-lucide="info"></i>
       </button>
       <button id="openInformativoBtn" class="rail-btn" type="button" aria-label="Informativo Juridico">
@@ -433,7 +415,7 @@
         <span id="watchBadge" class="rail-badge" hidden>0</span>
       </button>
     </nav>
-    <button id="openEscritorioBtn" class="rail-btn" type="button" aria-label="Abrir Ratio Escritorio" title="Ratio Escritorio">
+    <button id="openEscritorioBtn" class="rail-btn" type="button" aria-label="Abrir DataJus Escritorio" title="DataJus Escritorio">
       <i data-lucide="briefcase"></i>
     </button>
     <button class="rail-btn" type="button" data-open-acervo aria-label="Abrir Meu Acervo">
@@ -445,7 +427,10 @@
     <button class="rail-btn rail-settings" type="button" data-open-settings aria-label="Abrir configuracoes">
       <i data-lucide="settings"></i>
     </button>
-    <button id="openUpdateBtn" class="rail-btn rail-update-btn" type="button" aria-label="Atualizar Ratio">
+    <button id="logoutBtn" class="rail-btn" type="button" aria-label="Sair">
+      <i data-lucide="log-out"></i>
+    </button>
+    <button id="openUpdateBtn" class="rail-btn rail-update-btn" type="button" aria-label="Atualizar DataJus">
       <i data-lucide="download"></i>
       <span id="updateBadge" class="rail-badge" hidden></span>
     </button>
@@ -565,7 +550,7 @@
                 </div>
               </div>
               <div id="composerStatusStrip" class="composer-status-strip" aria-live="polite">
-                <span id="composerApiStatus" class="composer-status-badge" data-status="unknown">API Gemini inativa</span>
+                <span id="composerApiStatus" class="composer-status-badge" data-status="unknown">API de IA inativa</span>
                 <span id="appVersionLabel" class="composer-status-badge composer-status-badge-version" hidden></span>
               </div>
               <p id="requestState" class="request-state"></p>
@@ -625,10 +610,10 @@
     </details>
 
     <details class="disclosure" open>
-      <summary>Primeiros passos com API Gemini</summary>
+      <summary>Primeiros passos com provedores de IA</summary>
       <div class="disclosure-body">
         <p class="rag-panel-note">
-          A plataforma depende de <code>GEMINI_API_KEY</code> ativa para gerar respostas, embeddings e explicacoes.
+          A plataforma usa a chave do provedor escolhido para gerar respostas e explicacoes. Embeddings e TTS podem usar provedores diferentes.
         </p>
         <div class="about-inline-actions">
           <button id="openOnboardingGuideBtn" class="meta-btn" type="button">
@@ -646,7 +631,7 @@
           <span>Reranker</span>
           <select id="rerankerBackend">
             <option value="local">Local (BAAI/bge-reranker-v2-m3)</option>
-            <option value="gemini">Gemini (recomendado)</option>
+            <option value="gemini">Gemini remoto</option>
           </select>
         </label>
         <label class="field">
@@ -666,7 +651,7 @@
           <input id="preferRecent" type="checkbox" checked />
         </label>
         <p class="rag-panel-note">
-          <strong>Recomendado: Gemini.</strong> O reranker Gemini compreende contexto juridico e distingue teses de merito de ruido processual, entregando documentos de maior qualidade para a resposta final. O reranker local (BAAI) faz matching semantico superficial e pode priorizar decisoes sem tese de merito.
+          O reranker remoto melhora a selecao de documentos quando houver chave pessoal do provedor correspondente; o local reduz custo e chamadas externas.
         </p>
       </div>
     </details>
@@ -677,21 +662,57 @@
         <label class="field">
           <span>Provedor de geracao</span>
           <select id="generationProvider">
+            <option value="minimax">MiniMax</option>
             <option value="gemini">Gemini</option>
             <option value="claude">Claude (Anthropic)</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
           </select>
         </label>
         <p class="rag-panel-note">
-          <strong>Recomendado: Claude.</strong> Tende a produzir respostas com maior aderencia as regras do sistema, profundidade argumentativa e qualidade de citacao em portugues juridico. Gemini oferece menor custo e funciona sem chave adicional.
+          MiniMax-M2.7-highspeed e o padrao da instalacao e pode usar a chave global do servidor. Outros provedores exigem chave pessoal salva no seu usuario.
         </p>
         <div id="geminiModelFields">
           <label class="field">
             <span>Modelo principal de resposta</span>
-            <input id="generationModelInput" list="geminiModelsList" type="text" autocomplete="off" />
+            <select id="generationModelInput">
+              <optgroup label="Gemini">
+                <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                <option value="gemini-3-flash">gemini-3-flash</option>
+                <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
+                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+              </optgroup>
+              <optgroup label="OpenAI">
+                <option value="gpt-5.2">gpt-5.2</option>
+                <option value="gpt-5.1">gpt-5.1</option>
+                <option value="gpt-4.1">gpt-4.1</option>
+                <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+              </optgroup>
+              <optgroup label="DeepSeek">
+                <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+                <option value="deepseek-chat">deepseek-chat</option>
+                <option value="deepseek-reasoner">deepseek-reasoner</option>
+              </optgroup>
+              <optgroup label="MiniMax">
+                <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option>
+                <option value="MiniMax-M2.7">MiniMax-M2.7</option>
+                <option value="MiniMax-M2.5-highspeed">MiniMax-M2.5-highspeed</option>
+              </optgroup>
+            </select>
           </label>
           <label class="field">
             <span>Modelo fallback de resposta</span>
-            <input id="generationFallbackModelInput" list="geminiModelsList" type="text" autocomplete="off" />
+            <select id="generationFallbackModelInput">
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+              <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+              <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+              <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option>
+            </select>
           </label>
           <datalist id="geminiModelsList">
             <option value="gemini-3.1-pro-preview"></option>
@@ -701,6 +722,14 @@
             <option value="gemini-2.5-pro"></option>
             <option value="gemini-2.5-flash"></option>
             <option value="gemini-2.5-flash-lite"></option>
+            <option value="gpt-5.2"></option>
+            <option value="gpt-5.1"></option>
+            <option value="gpt-4.1"></option>
+            <option value="gpt-4.1-mini"></option>
+            <option value="deepseek-v4-pro"></option>
+            <option value="deepseek-v4-flash"></option>
+            <option value="MiniMax-M2.7"></option>
+            <option value="MiniMax-M2.7-highspeed"></option>
           </datalist>
         </div>
         <div id="claudeModelFields" style="display:none">
@@ -718,24 +747,66 @@
       </div>
     </details>
 
-    <details class="disclosure" id="claudeKeyDisclosure">
-      <summary>Chave Claude (Anthropic)</summary>
+    <details class="disclosure" open>
+      <summary>Chaves dos provedores</summary>
       <div class="disclosure-body">
         <label class="field">
-          <span>ANTHROPIC_API_KEY</span>
-          <input id="settingsClaudeKeyInput" type="password" autocomplete="off" placeholder="sk-ant-..." />
+          <span>Provedor</span>
+          <select id="settingsProviderKeySelect">
+            <option value="minimax">MiniMax</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="claude">Claude (Anthropic)</option>
+            <option value="gemini">Gemini</option>
+          </select>
+        </label>
+        <label class="field">
+          <span id="settingsProviderKeyLabel">OPENAI_API_KEY</span>
+          <input id="settingsProviderKeyInput" type="password" autocomplete="off" placeholder="Cole aqui sua API key" />
         </label>
         <div class="rag-panel-actions" style="margin-top:0.5rem">
-          <label class="onboarding-persist-row" style="margin-bottom:0.4rem">
-            <input id="settingsClaudePersistEnv" type="checkbox" checked />
-            <span>Salvar em <code>.env</code></span>
-          </label>
-          <button id="settingsSaveClaudeKeyBtn" class="chip-btn" type="button">Validar e salvar chave</button>
+          <button id="settingsSaveProviderKeyBtn" class="chip-btn" type="button">Validar e salvar chave</button>
         </div>
-        <p id="settingsClaudeKeyStatus" class="rag-config-status"></p>
+        <p id="settingsProviderKeyStatus" class="rag-config-status"></p>
+      </div>
+    </details>
+
+    <details class="disclosure" open>
+      <summary>Embeddings</summary>
+      <div class="disclosure-body">
+        <label class="field">
+          <span>Provedor de embedding</span>
+          <select id="embeddingProviderSelect">
+            <option value="gemini">Gemini</option>
+            <option value="lm_studio">LM Studio local</option>
+            <option value="openai_compatible">OpenAI-compatible</option>
+            <option value="openai">OpenAI</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Modelo de embedding</span>
+          <select id="embeddingModelInput">
+            <option value="gemini-embedding-001">gemini-embedding-001</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Base URL</span>
+          <select id="embeddingBaseUrlInput">
+            <option value="">Padrão do provedor</option>
+            <option value="https://api.openai.com/v1">https://api.openai.com/v1</option>
+            <option value="http://127.0.0.1:1234/v1">LM Studio local</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>API key opcional</span>
+          <input id="embeddingApiKeyInput" type="password" autocomplete="off" placeholder="lm-studio / sk-..." />
+        </label>
+        <div class="rag-panel-actions" style="margin-top:0.5rem">
+          <button id="saveEmbeddingConfigBtn" class="chip-btn" type="button">Salvar embedding</button>
+        </div>
+        <p id="embeddingConfigStatus" class="rag-config-status"></p>
         <p class="rag-panel-note">
-          Opcional. Necessaria apenas quando o provedor estiver configurado como Claude.
-          Obtenha sua chave em <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>.
+          O índice atual espera vetores de 768 dimensões. Se trocar o modelo por outro tamanho, reindexe a base correspondente.
         </p>
       </div>
     </details>
@@ -758,7 +829,9 @@
           </label>
           <label class="field">
             <span>Modelo da persona (opcional)</span>
-            <input id="personaModelInput" list="geminiModelsList" type="text" autocomplete="off" placeholder="Vazio = usa o modelo global" />
+            <select id="personaModelInput">
+              <option value="">Usar modelo global</option>
+            </select>
           </label>
         </div>
         <label class="field">
@@ -794,6 +867,21 @@
           <select id="ttsProviderSelect">
             <option value="legacy_google">Classico (Google TTS Legacy)</option>
             <option value="gemini_native">Moderno (Gemini Native TTS)</option>
+            <option value="openai">OpenAI (gpt-4o-mini-tts)</option>
+            <option value="minimax">MiniMax Speech</option>
+            <option value="kokoro_local">Local (Kokoro)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Modelo de voz</span>
+          <select id="ttsModelSelect">
+            <option value="speech-2.8-hd">speech-2.8-hd</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Voz</span>
+          <select id="ttsVoiceSelect">
+            <option value="Portuguese_Narrator">Portuguese_Narrator</option>
           </select>
         </label>
         <p class="rag-panel-note">

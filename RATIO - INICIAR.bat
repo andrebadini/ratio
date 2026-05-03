@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 
 cd /d "%~dp0"
-title Ratio - Pesquisa Jurisprudencial (Web Inicializador)
+title DataJus - Pesquisa Jurisprudencial (Web Inicializador)
 
 set "RUNTIME_DIR=%CD%\logs\runtime"
 if not exist "%RUNTIME_DIR%" mkdir "%RUNTIME_DIR%"
@@ -23,7 +23,7 @@ if not exist "%HF_HUB_CACHE%" mkdir "%HF_HUB_CACHE%"
 if not exist "%TRANSFORMERS_CACHE%" mkdir "%TRANSFORMERS_CACHE%"
 
 echo ============================================================
-echo Ratio - Pesquisa Jurisprudencial (Web Inicializador)
+echo DataJus - Pesquisa Jurisprudencial (Web Inicializador)
 echo ============================================================
 echo.
 echo [AVISO] E normal que o Banco de Dados (LanceDB) demore

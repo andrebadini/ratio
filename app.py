@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from rag.query import RERANKER_BACKEND, explain_answer, run_query
 
 st.set_page_config(
-    page_title="Ratio",
+    page_title="DataJus",
     page_icon="âš–ï¸",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -948,7 +948,7 @@ if "audio_error" not in st.session_state:
 st.markdown(
     """
     <div class="hero-wrap">
-        <h1 class="hero-title">âš–ï¸ Ratio - Pesquisa Jurisprudencial</h1>
+        <h1 class="hero-title">âš–ï¸ DataJus - Pesquisa Jurisprudencial</h1>
         <p class="hero-subtitle">
             Busca semÃ¢ntica avanÃ§ada sobre acervo jurÃ­dico com resposta fundamentada e citaÃ§Ãµes verificadas.
         </p>

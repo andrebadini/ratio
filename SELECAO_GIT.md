@@ -1,4 +1,4 @@
-# Pacote Git-Ready (Ratio)
+# Pacote Git-Ready (DataJus)
 
 Esta pasta foi preparada para uso direto da aplicacao em maquina local.
 

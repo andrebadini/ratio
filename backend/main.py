@@ -8,15 +8,18 @@ except Exception:
 
 import base64
 from collections import deque
+from contextlib import contextmanager
 import copy
 import html
 import io
 import json
 import logging
 import hashlib
+import hmac
 import os
 import queue
 import re
+import secrets
 import threading
 import sys
 import time
@@ -106,6 +109,37 @@ from rag.query import (  # noqa: E402
     orgao_label,
     run_query,
     type_label,
+)
+
+_RAG_QUERY_MODULE = sys.modules.get("rag.query")
+OPENAI_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))).strip().rstrip("/")
+DEEPSEEK_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "DEEPSEEK_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))).strip().rstrip("/")
+MINIMAX_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "MINIMAX_BASE_URL", os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1"))).strip().rstrip("/")
+EMBED_DIM = int(getattr(_RAG_QUERY_MODULE, "EMBED_DIM", 768))
+EMBED_MODEL = str(getattr(_RAG_QUERY_MODULE, "EMBED_MODEL", os.getenv("EMBED_MODEL", "gemini-embedding-001")))
+EMBEDDING_PROVIDER = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "gemini")))
+EMBEDDING_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_BASE_URL", os.getenv("EMBEDDING_BASE_URL", "http://127.0.0.1:1234/v1")))
+configure_embedding_provider = getattr(_RAG_QUERY_MODULE, "configure_embedding_provider", None)
+configure_openai_compatible_api_key = getattr(_RAG_QUERY_MODULE, "configure_openai_compatible_api_key", None)
+has_openai_api_key = getattr(_RAG_QUERY_MODULE, "has_openai_api_key", lambda: bool((os.getenv("OPENAI_API_KEY") or "").strip()))
+has_deepseek_api_key = getattr(_RAG_QUERY_MODULE, "has_deepseek_api_key", lambda: bool((os.getenv("DEEPSEEK_API_KEY") or "").strip()))
+has_minimax_api_key = getattr(_RAG_QUERY_MODULE, "has_minimax_api_key", lambda: bool((os.getenv("MINIMAX_API_KEY") or "").strip()))
+
+
+@contextmanager
+def _noop_provider_credentials_context(_credentials: Optional[dict[str, str]] = None):
+    yield
+
+
+provider_credentials_context = getattr(
+    _RAG_QUERY_MODULE,
+    "provider_credentials_context",
+    _noop_provider_credentials_context,
+)
+request_provider_credentials = getattr(
+    _RAG_QUERY_MODULE,
+    "request_provider_credentials",
+    lambda: {},
 )
 
 
@@ -325,7 +359,7 @@ def _get_acervo_httpx_client(timeout_ms: int) -> httpx.Client:
         return client
 
 app = FastAPI(
-    title="Ratio API - Pesquisa Jurisprudencial",
+    title="DataJus API - Pesquisa Jurisprudencial",
     version="1.0.0",
     description="Backend desacoplado para consulta RAG STF/STJ.",
 )
@@ -410,6 +444,285 @@ RATE_LIMIT_JURIS_UPDATE_PER_HOUR = max(0, int(os.getenv("RATE_LIMIT_JURIS_UPDATE
 
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_STATE: dict[str, dict[str, deque[float]]] = {}
+
+AUTH_SESSION_TTL_SECONDS = max(3600, int(os.getenv("RATIO_AUTH_SESSION_TTL_SECONDS", "604800")))
+AUTH_PBKDF2_ITERATIONS = max(120000, int(os.getenv("RATIO_AUTH_PBKDF2_ITERATIONS", "260000")))
+AUTH_USERS_PATH = _runtime_logs_dir() / "users.json"
+AUTH_ALLOWLIST_PATH = _runtime_logs_dir() / "auth_allowlist.json"
+AUTH_CREDENTIALS_PATH = _runtime_logs_dir() / "user_credentials.json"
+AUTH_SECRET_PATH = _runtime_logs_dir() / "auth_secret.key"
+AUTH_PROVIDER_IDS = {"gemini", "anthropic", "claude", "openai", "deepseek", "minimax"}
+_AUTH_LOCK = threading.Lock()
+_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+class AuthRegisterRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=120)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=120)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class ProviderCredentialRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    provider: str = Field(min_length=3, max_length=40)
+    api_key: str = Field(min_length=8, max_length=500)
+    validate_key: bool = Field(default=True, validation_alias="validate")
+    test_model: Optional[str] = Field(default=None, max_length=120)
+
+
+def _auth_now() -> int:
+    return int(time.time())
+
+
+def _normalize_username(value: str) -> str:
+    return str(value or "").replace("\x00", "").strip().lower()
+
+
+def _safe_json_read(path: Path, fallback: Any) -> Any:
+    try:
+        if not path.exists():
+            return copy.deepcopy(fallback)
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return copy.deepcopy(fallback)
+
+
+def _safe_json_write(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _authorized_users() -> set[str]:
+    users: set[str] = set()
+    raw_env = (os.getenv("RATIO_AUTHORIZED_USERS") or "").strip()
+    for item in raw_env.split(","):
+        normalized = _normalize_username(item)
+        if normalized:
+            users.add(normalized)
+    payload = _safe_json_read(AUTH_ALLOWLIST_PATH, {})
+    raw_items: Any = payload.get("users") if isinstance(payload, dict) else payload
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            normalized = _normalize_username(str(item or ""))
+            if normalized:
+                users.add(normalized)
+    return users
+
+
+def _load_users() -> dict[str, Any]:
+    payload = _safe_json_read(AUTH_USERS_PATH, {"version": 1, "users": {}})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "users": {}}
+    users = payload.get("users")
+    if not isinstance(users, dict):
+        payload["users"] = {}
+    return payload
+
+
+def _save_users(payload: dict[str, Any]) -> None:
+    _safe_json_write(AUTH_USERS_PATH, payload)
+
+
+def _hash_password(password: str, salt_b64: str | None = None) -> dict[str, Any]:
+    salt = base64.b64decode(salt_b64) if salt_b64 else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password or "").encode("utf-8"),
+        salt,
+        AUTH_PBKDF2_ITERATIONS,
+    )
+    return {
+        "algorithm": "pbkdf2_sha256",
+        "iterations": AUTH_PBKDF2_ITERATIONS,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "hash": base64.b64encode(digest).decode("ascii"),
+    }
+
+
+def _verify_password(password: str, stored: dict[str, Any]) -> bool:
+    try:
+        expected = base64.b64decode(str(stored.get("hash") or ""))
+        salt = base64.b64decode(str(stored.get("salt") or ""))
+        iterations = int(stored.get("iterations") or AUTH_PBKDF2_ITERATIONS)
+        digest = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(expected, digest)
+    except Exception:
+        return False
+
+
+def _auth_secret() -> bytes:
+    raw = (os.getenv("RATIO_SECRET_KEY") or "").strip()
+    if raw:
+        return hashlib.sha256(raw.encode("utf-8")).digest()
+    if AUTH_SECRET_PATH.exists():
+        saved = AUTH_SECRET_PATH.read_text(encoding="utf-8").strip()
+        if saved:
+            return hashlib.sha256(saved.encode("utf-8")).digest()
+    secret = secrets.token_urlsafe(48)
+    AUTH_SECRET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_SECRET_PATH.write_text(secret, encoding="utf-8")
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+def _xor_stream(data: bytes, *, nonce: bytes, key: bytes) -> bytes:
+    output = bytearray()
+    counter = 0
+    while len(output) < len(data):
+        block = hashlib.sha256(key + nonce + counter.to_bytes(8, "big")).digest()
+        output.extend(block)
+        counter += 1
+    return bytes(b ^ k for b, k in zip(data, output))
+
+
+def _protect_secret(value: str) -> dict[str, str]:
+    nonce = secrets.token_bytes(16)
+    raw = str(value or "").encode("utf-8")
+    encrypted = _xor_stream(raw, nonce=nonce, key=_auth_secret())
+    mac = hmac.new(_auth_secret(), nonce + encrypted, hashlib.sha256).digest()
+    return {
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "ciphertext": base64.b64encode(encrypted).decode("ascii"),
+        "mac": base64.b64encode(mac).decode("ascii"),
+    }
+
+
+def _unprotect_secret(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    try:
+        nonce = base64.b64decode(str(payload.get("nonce") or ""))
+        encrypted = base64.b64decode(str(payload.get("ciphertext") or ""))
+        mac = base64.b64decode(str(payload.get("mac") or ""))
+        expected = hmac.new(_auth_secret(), nonce + encrypted, hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, expected):
+            return ""
+        return _xor_stream(encrypted, nonce=nonce, key=_auth_secret()).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _load_user_credentials() -> dict[str, Any]:
+    payload = _safe_json_read(AUTH_CREDENTIALS_PATH, {"version": 1, "users": {}})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "users": {}}
+    if not isinstance(payload.get("users"), dict):
+        payload["users"] = {}
+    return payload
+
+
+def _save_user_credentials(payload: dict[str, Any]) -> None:
+    _safe_json_write(AUTH_CREDENTIALS_PATH, payload)
+
+
+def _normalize_credential_provider(provider: str) -> str:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "claude":
+        return "anthropic"
+    return normalized
+
+
+def _user_provider_keys(username: str) -> dict[str, str]:
+    payload = _load_user_credentials()
+    user_payload = payload.get("users", {}).get(_normalize_username(username), {})
+    providers = user_payload.get("providers") if isinstance(user_payload, dict) else {}
+    if not isinstance(providers, dict):
+        return {}
+    result: dict[str, str] = {}
+    for provider, protected in providers.items():
+        normalized = _normalize_credential_provider(provider)
+        key = _unprotect_secret(protected)
+        if normalized and key:
+            result[normalized] = key
+    return result
+
+
+def _store_user_provider_key(username: str, provider: str, api_key: str) -> None:
+    normalized_user = _normalize_username(username)
+    normalized_provider = _normalize_credential_provider(provider)
+    if normalized_provider not in AUTH_PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail={"code": "invalid_provider", "message": "Provedor invalido."})
+    payload = _load_user_credentials()
+    users = payload.setdefault("users", {})
+    user_payload = users.setdefault(normalized_user, {"providers": {}})
+    providers = user_payload.setdefault("providers", {})
+    providers[normalized_provider] = _protect_secret(api_key)
+    user_payload["updated_at"] = _utc_now_iso()
+    _save_user_credentials(payload)
+
+
+def _credential_status_for_user(username: str) -> dict[str, bool]:
+    keys = _user_provider_keys(username)
+    return {
+        "gemini": bool(keys.get("gemini")),
+        "claude": bool(keys.get("anthropic")),
+        "anthropic": bool(keys.get("anthropic")),
+        "openai": bool(keys.get("openai")),
+        "deepseek": bool(keys.get("deepseek")),
+        "minimax": bool(keys.get("minimax")),
+        "minimax_global": bool((os.getenv("MINIMAX_API_KEY") or "").strip()),
+    }
+
+
+@contextmanager
+def _request_credentials_context(username: str):
+    with provider_credentials_context(_user_provider_keys(username)):
+        yield
+
+
+def _issue_session(username: str) -> dict[str, Any]:
+    token = secrets.token_urlsafe(40)
+    now = _auth_now()
+    session = {"username": _normalize_username(username), "created_at": now, "expires_at": now + AUTH_SESSION_TTL_SECONDS}
+    with _AUTH_LOCK:
+        _AUTH_SESSIONS[token] = session
+    return {"token": token, **session}
+
+
+def _bearer_token(request: Request) -> str:
+    header = str(request.headers.get("authorization") or "").strip()
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return ""
+
+
+def _require_auth_from_request(request: Request) -> dict[str, Any]:
+    token = _bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": "unauthenticated", "message": "Login necessario."})
+    with _AUTH_LOCK:
+        session = _AUTH_SESSIONS.get(token)
+        if not session or int(session.get("expires_at") or 0) < _auth_now():
+            _AUTH_SESSIONS.pop(token, None)
+            raise HTTPException(status_code=401, detail={"code": "session_expired", "message": "Sessao expirada."})
+    return dict(session)
+
+
+def _current_username(request: Request) -> str:
+    auth_user = getattr(request.state, "auth_user", None)
+    if not isinstance(auth_user, dict):
+        if "pytest" in sys.modules and not (os.getenv("RATIO_AUTHORIZED_USERS") or "").strip():
+            return ""
+        auth_user = _require_auth_from_request(request)
+    return _normalize_username(str(auth_user.get("username") or ""))
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/health", "/api/auth/register", "/api/auth/login"}
+    is_public = path in public_paths or path.startswith("/escritorio")
+    test_bypass = "pytest" in sys.modules and not (os.getenv("RATIO_AUTHORIZED_USERS") or "").strip()
+    if path.startswith("/api/") and not is_public and not test_bypass:
+        try:
+            request.state.auth_user = _require_auth_from_request(request)
+        except HTTPException as exc:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 
 def _rate_limit_client_key(request: Request) -> str:
@@ -522,7 +835,7 @@ class GeminiConfigRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     api_key: str = Field(min_length=8, max_length=400)
     persist_env: bool = True
-    validate_key: bool = Field(default=True, alias="validate")
+    validate_key: bool = Field(default=True, validation_alias="validate")
     test_model: Optional[str] = Field(default=GENERATION_MODEL, max_length=120)
     validation_timeout_ms: int = Field(
         default=int(os.getenv("GEMINI_KEY_VALIDATION_TIMEOUT_MS", "12000")),
@@ -535,13 +848,33 @@ class AnthropicConfigRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     api_key: str = Field(min_length=8, max_length=400)
     persist_env: bool = True
-    validate_key: bool = Field(default=True, alias="validate")
+    validate_key: bool = Field(default=True, validation_alias="validate")
     test_model: Optional[str] = Field(default="claude-sonnet-4-20250514", max_length=120)
     validation_timeout_ms: int = Field(default=12000, ge=3000, le=120000)
 
 
+class OpenAICompatibleConfigRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    provider: Literal["openai", "deepseek", "minimax"]
+    api_key: str = Field(min_length=8, max_length=400)
+    persist_env: bool = True
+    validate_key: bool = Field(default=True, validation_alias="validate")
+    test_model: Optional[str] = Field(default=None, max_length=120)
+    validation_timeout_ms: int = Field(default=12000, ge=3000, le=120000)
+
+
+class EmbeddingConfigRequest(BaseModel):
+    provider: str = Field(min_length=3, max_length=40)
+    model: str = Field(min_length=2, max_length=160)
+    base_url: Optional[str] = Field(default=None, max_length=300)
+    api_key: Optional[str] = Field(default=None, max_length=400)
+    persist_env: bool = True
+
+
 class TTSProviderConfigRequest(BaseModel):
     provider: str = Field(min_length=3, max_length=40)
+    model: Optional[str] = Field(default=None, max_length=160)
+    voice: Optional[str] = Field(default=None, max_length=160)
     persist_env: bool = False
 
 
@@ -563,6 +896,12 @@ def _normalize_tts_provider(raw: str) -> str:
         return "legacy_google"
     if value in {"gemini", "gemini_native", "gemini-native", "gemini_preview", "gemini-native-preview"}:
         return "gemini_native"
+    if value in {"openai", "openai_tts", "openai-tts"}:
+        return "openai"
+    if value in {"minimax", "minimax_tts", "minimax-tts"}:
+        return "minimax"
+    if value in {"kokoro", "local", "local_kokoro", "kokoro_local", "kokoro-local"}:
+        return "kokoro_local"
     return "gemini_native"
 
 
@@ -580,10 +919,21 @@ def _is_supported_tts_provider(raw: str) -> bool:
         "gemini-native",
         "gemini_preview",
         "gemini-native-preview",
+        "openai",
+        "openai_tts",
+        "openai-tts",
+        "minimax",
+        "minimax_tts",
+        "minimax-tts",
+        "kokoro",
+        "local",
+        "local_kokoro",
+        "kokoro_local",
+        "kokoro-local",
     }
 
 
-TTS_PROVIDER = _normalize_tts_provider(os.getenv("TTS_PROVIDER", "gemini_native"))
+TTS_PROVIDER = _normalize_tts_provider(os.getenv("TTS_PROVIDER", "minimax"))
 TTS_RATE = 1.2
 TTS_PITCH_SEMITONES = -4.5
 TTS_BREAK_ALT_MS = 450
@@ -618,6 +968,38 @@ TTS_PREFETCH_CONCURRENCY = max(
 )
 TTS_CACHE_ENABLED = os.getenv("GEMINI_TTS_CACHE_ENABLED", "1").strip() != "0"
 TTS_PROVIDER_FALLBACK = os.getenv("TTS_PROVIDER_FALLBACK", "1").strip() != "0"
+OPENAI_TTS_API_KEY = (os.getenv("OPENAI_TTS_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_TTS_BASE_URL = (os.getenv("OPENAI_TTS_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").strip().rstrip("/")
+OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE") or "coral").strip() or "coral"
+OPENAI_TTS_FORMAT = (os.getenv("OPENAI_TTS_FORMAT") or "mp3").strip().lower() or "mp3"
+OPENAI_TTS_INSTRUCTIONS = (
+    os.getenv("OPENAI_TTS_INSTRUCTIONS")
+    or "Fale em portugues brasileiro claro, juridico, natural e sem dramatizacao."
+).strip()
+MINIMAX_TTS_API_KEY = (os.getenv("MINIMAX_TTS_API_KEY") or os.getenv("MINIMAX_API_KEY") or "").strip()
+MINIMAX_TTS_ENDPOINT = (os.getenv("MINIMAX_TTS_ENDPOINT") or "https://api.minimax.io/v1/t2a_v2").strip()
+MINIMAX_TTS_MODEL = (os.getenv("MINIMAX_TTS_MODEL") or "speech-2.8-hd").strip() or "speech-2.8-hd"
+MINIMAX_TTS_VOICE = (os.getenv("MINIMAX_TTS_VOICE") or "Portuguese_Narrator").strip() or "Portuguese_Narrator"
+MINIMAX_TTS_LANGUAGE_BOOST = (os.getenv("MINIMAX_TTS_LANGUAGE_BOOST") or "Portuguese").strip() or "Portuguese"
+MINIMAX_TTS_OUTPUT_FORMAT = (os.getenv("MINIMAX_TTS_OUTPUT_FORMAT") or "hex").strip().lower() or "hex"
+KOKORO_TTS_BASE_URL = (os.getenv("KOKORO_TTS_BASE_URL") or "http://127.0.0.1:8880/v1").strip().rstrip("/")
+KOKORO_TTS_MODEL = (os.getenv("KOKORO_TTS_MODEL") or "kokoro").strip() or "kokoro"
+KOKORO_TTS_VOICE = (os.getenv("KOKORO_TTS_VOICE") or "pf_dora").strip() or "pf_dora"
+KOKORO_TTS_SPEED = float(os.getenv("KOKORO_TTS_SPEED", "1.0"))
+TTS_MODEL = (
+    os.getenv("TTS_MODEL")
+    or (
+        LEGACY_TTS_DEFAULT_ENDPOINT and {
+            "legacy_google": "google-legacy",
+            "openai": OPENAI_TTS_MODEL,
+            "minimax": MINIMAX_TTS_MODEL,
+            "kokoro_local": KOKORO_TTS_MODEL,
+            "gemini_native": (os.getenv("GEMINI_TTS_MODEL") or "gemini-2.5-pro-preview-tts").strip(),
+        }.get(TTS_PROVIDER, (os.getenv("GEMINI_TTS_MODEL") or "gemini-2.5-pro-preview-tts").strip())
+    )
+    or "speech-2.8-hd"
+).strip()
 LEGACY_TTS_VOICE_NAME = (os.getenv("GOOGLE_TTS_VOICE_NAME") or "pt-BR-Neural2-B").strip() or "pt-BR-Neural2-B"
 LEGACY_TTS_ENDPOINT = (
     (os.getenv("GOOGLE_TTS_ENDPOINT") or LEGACY_TTS_DEFAULT_ENDPOINT).strip()
@@ -1033,24 +1415,43 @@ def _tts_candidate_models() -> list[str]:
 
 
 def _legacy_tts_api_key() -> str:
-    return (os.getenv("GOOGLE_TTS_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    creds = request_provider_credentials()
+    return (os.getenv("GOOGLE_TTS_API_KEY") or creds.get("gemini") or os.getenv("GEMINI_API_KEY") or "").strip()
 
 
 def _tts_response_voice() -> str:
     if TTS_PROVIDER == "legacy_google":
         return LEGACY_TTS_VOICE_NAME
+    if TTS_PROVIDER == "openai":
+        return OPENAI_TTS_VOICE
+    if TTS_PROVIDER == "minimax":
+        return MINIMAX_TTS_VOICE
+    if TTS_PROVIDER == "kokoro_local":
+        return KOKORO_TTS_VOICE
     return _normalize_voice_name_for_gemini(TTS_VOICE_NAME)
 
 
 def _tts_response_model() -> str:
     if TTS_PROVIDER == "legacy_google":
         return "google-cloud-text-to-speech"
+    if TTS_PROVIDER == "openai":
+        return OPENAI_TTS_MODEL
+    if TTS_PROVIDER == "minimax":
+        return MINIMAX_TTS_MODEL
+    if TTS_PROVIDER == "kokoro_local":
+        return KOKORO_TTS_MODEL
     return TTS_MODEL
 
 
 def _tts_response_max_chars() -> int:
     if TTS_PROVIDER == "legacy_google":
         return LEGACY_TTS_MAX_CHARS
+    if TTS_PROVIDER == "openai":
+        return 4096
+    if TTS_PROVIDER == "minimax":
+        return 10000
+    if TTS_PROVIDER == "kokoro_local":
+        return 5000
     return TTS_MAX_CHARS
 
 
@@ -1763,6 +2164,119 @@ def _synthesize_legacy_google_tts(text: str, trace_id: str | None = None) -> tup
     )
 
 
+def _synthesize_openai_tts(text: str, trace_id: str | None = None) -> tuple[bytes, str]:
+    trace = (trace_id or "").strip() or _new_trace_id()
+    request_key = request_provider_credentials().get("openai", "")
+    api_key = request_key or OPENAI_TTS_API_KEY
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY ausente para TTS OpenAI.")
+    prepared = _normalize_for_tts(text)
+    chunks = _split_tts_chunks(prepared, max_ssml_bytes=4096)
+    endpoint = f"{OPENAI_TTS_BASE_URL.rstrip('/')}/audio/speech"
+    fmt = OPENAI_TTS_FORMAT if OPENAI_TTS_FORMAT in {"mp3", "opus", "aac", "flac", "wav", "pcm"} else "mp3"
+    mime_type = "audio/mpeg" if fmt == "mp3" else f"audio/{fmt}"
+    parts: list[bytes] = []
+    _log_tts_event("tts_openai_start", trace, chunks=len(chunks), model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE)
+    for idx, chunk in enumerate(chunks, start=1):
+        resp = requests.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": OPENAI_TTS_MODEL,
+                "input": chunk,
+                "voice": OPENAI_TTS_VOICE,
+                "instructions": OPENAI_TTS_INSTRUCTIONS,
+                "response_format": fmt,
+            },
+            timeout=max(10.0, min(TTS_REQUEST_TIMEOUT_MS / 1000.0, 300.0)),
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Falha no TTS OpenAI ({resp.status_code}): {resp.text[:500]}")
+        parts.append(resp.content)
+        _log_tts_event("tts_openai_chunk_ok", trace, chunk_index=idx, audio_bytes=len(resp.content))
+    return b"".join(parts), mime_type
+
+
+def _extract_minimax_audio(payload: dict[str, Any]) -> bytes:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    candidates = [payload.get("audio") if isinstance(payload, dict) else None]
+    if isinstance(data, dict):
+        candidates.extend([data.get("audio"), data.get("audio_file")])
+    for value in candidates:
+        if not value:
+            continue
+        raw = str(value).strip()
+        try:
+            return bytes.fromhex(raw)
+        except Exception:
+            pass
+        try:
+            return base64.b64decode(raw)
+        except Exception:
+            pass
+    raise RuntimeError("Resposta TTS MiniMax sem audio.")
+
+
+def _synthesize_minimax_tts(text: str, trace_id: str | None = None) -> tuple[bytes, str]:
+    trace = (trace_id or "").strip() or _new_trace_id()
+    request_key = request_provider_credentials().get("minimax", "")
+    api_key = request_key or MINIMAX_TTS_API_KEY
+    if not api_key:
+        raise RuntimeError("MINIMAX_API_KEY ausente para TTS MiniMax.")
+    prepared = _normalize_for_tts(text)
+    chunks = _split_tts_chunks(prepared, max_ssml_bytes=10000)
+    parts: list[bytes] = []
+    _log_tts_event("tts_minimax_start", trace, chunks=len(chunks), model=MINIMAX_TTS_MODEL, voice=MINIMAX_TTS_VOICE)
+    for idx, chunk in enumerate(chunks, start=1):
+        resp = requests.post(
+            MINIMAX_TTS_ENDPOINT,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": MINIMAX_TTS_MODEL,
+                "text": chunk,
+                "stream": False,
+                "language_boost": MINIMAX_TTS_LANGUAGE_BOOST,
+                "output_format": MINIMAX_TTS_OUTPUT_FORMAT,
+                "voice_setting": {"voice_id": MINIMAX_TTS_VOICE, "speed": 1, "vol": 1, "pitch": 0},
+                "audio_setting": {"sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1},
+            },
+            timeout=max(10.0, min(TTS_REQUEST_TIMEOUT_MS / 1000.0, 300.0)),
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Falha no TTS MiniMax ({resp.status_code}): {resp.text[:500]}")
+        audio = _extract_minimax_audio(resp.json())
+        parts.append(audio)
+        _log_tts_event("tts_minimax_chunk_ok", trace, chunk_index=idx, audio_bytes=len(audio))
+    return b"".join(parts), "audio/mpeg"
+
+
+def _synthesize_kokoro_tts(text: str, trace_id: str | None = None) -> tuple[bytes, str]:
+    trace = (trace_id or "").strip() or _new_trace_id()
+    prepared = _normalize_for_tts(text)
+    chunks = _split_tts_chunks(prepared, max_ssml_bytes=5000)
+    endpoint = f"{KOKORO_TTS_BASE_URL.rstrip('/')}/audio/speech"
+    parts: list[bytes] = []
+    _log_tts_event("tts_kokoro_start", trace, chunks=len(chunks), model=KOKORO_TTS_MODEL, voice=KOKORO_TTS_VOICE)
+    for idx, chunk in enumerate(chunks, start=1):
+        resp = requests.post(
+            endpoint,
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": KOKORO_TTS_MODEL,
+                "input": chunk,
+                "voice": KOKORO_TTS_VOICE,
+                "speed": KOKORO_TTS_SPEED,
+                "response_format": "mp3",
+            },
+            timeout=max(10.0, min(TTS_REQUEST_TIMEOUT_MS / 1000.0, 300.0)),
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Falha no TTS Kokoro local ({resp.status_code}): {resp.text[:500]}")
+        parts.append(resp.content)
+        _log_tts_event("tts_kokoro_chunk_ok", trace, chunk_index=idx, audio_bytes=len(resp.content))
+    return b"".join(parts), "audio/mpeg"
+
+
 def _stream_legacy_tts_chunks(
     text: str,
     trace_id: str | None = None,
@@ -1782,6 +2296,12 @@ def _stream_legacy_tts_chunks(
 def _synthesize_tts(text: str, trace_id: str | None = None) -> tuple[bytes, str]:
     if TTS_PROVIDER == "legacy_google":
         return _synthesize_legacy_google_tts(text, trace_id=trace_id)
+    if TTS_PROVIDER == "openai":
+        return _synthesize_openai_tts(text, trace_id=trace_id)
+    if TTS_PROVIDER == "minimax":
+        return _synthesize_minimax_tts(text, trace_id=trace_id)
+    if TTS_PROVIDER == "kokoro_local":
+        return _synthesize_kokoro_tts(text, trace_id=trace_id)
     try:
         return _synthesize_google_tts(text, trace_id=trace_id)
     except RuntimeError as exc:
@@ -1806,6 +2326,10 @@ def _stream_tts_chunks(
 ) -> "Generator[tuple[bytes, str, int, int], None, None]":
     if TTS_PROVIDER == "legacy_google":
         yield from _stream_legacy_tts_chunks(text, trace_id=trace_id)
+        return
+    if TTS_PROVIDER in {"openai", "minimax", "kokoro_local"}:
+        audio, mime_type = _synthesize_tts(text, trace_id=trace_id)
+        yield audio, mime_type, 1, 1
         return
 
     emitted_any = False
@@ -1862,7 +2386,7 @@ def _serialize_doc(idx: int, row: dict[str, Any]) -> dict[str, Any]:
     source_id = str(row.get("source_id") or "").strip() or "ratio"
     source_label = str(row.get("source_label") or "").strip()
     if not source_label:
-        source_label = "Base Ratio (STF/STJ)" if source_id == "ratio" else source_id
+        source_label = "Base DataJus (STF/STJ)" if source_id == "ratio" else source_id
     source_kind = str(row.get("source_kind") or "").strip() or ("ratio" if source_id == "ratio" else "user")
     metadata_extra = _parse_metadata_extra(row.get("metadata_extra"))
     source_pdf = str(metadata_extra.get("source_pdf") or "").strip()
@@ -1936,6 +2460,43 @@ def _upsert_env_anthropic_key(api_key: str) -> Path:
     return env_path
 
 
+def _upsert_env_key(name: str, api_key: str) -> Path:
+    env_path = PROJECT_ROOT / ".env"
+    safe_name = re.sub(r"[^A-Z0-9_]", "", str(name or "").upper())
+    if not safe_name:
+        raise RuntimeError("Nome de variavel .env invalido.")
+    key_line = f"{safe_name}={api_key}"
+    current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    if re.search(rf"(?im)^\s*{re.escape(safe_name)}\s*=", current):
+        updated = re.sub(rf"(?im)^\s*{re.escape(safe_name)}\s*=.*$", key_line, current, count=1)
+    else:
+        updated = current
+        if updated and not updated.endswith("\n"):
+            updated += "\n"
+        updated += key_line + "\n"
+    env_path.write_text(updated, encoding="utf-8")
+    return env_path
+
+
+def _upsert_env_values(values: dict[str, str]) -> Path:
+    env_path = PROJECT_ROOT / ".env"
+    current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    updated = current
+    for raw_name, raw_value in values.items():
+        safe_name = re.sub(r"[^A-Z0-9_]", "", str(raw_name or "").upper())
+        if not safe_name:
+            continue
+        line = f"{safe_name}={raw_value}"
+        if re.search(rf"(?im)^\s*{re.escape(safe_name)}\s*=", updated):
+            updated = re.sub(rf"(?im)^\s*{re.escape(safe_name)}\s*=.*$", line, updated, count=1)
+        else:
+            if updated and not updated.endswith("\n"):
+                updated += "\n"
+            updated += line + "\n"
+    env_path.write_text(updated, encoding="utf-8")
+    return env_path
+
+
 def _upsert_env_tts_provider(provider: str) -> Path:
     env_path = PROJECT_ROOT / ".env"
     provider_line = f"TTS_PROVIDER={provider}"
@@ -1963,6 +2524,21 @@ def _tts_provider_options_payload() -> list[dict[str, str]]:
             "label": "Moderno (Gemini Native TTS)",
             "description": "Voz nativa Gemini (mais novo, pode oscilar em estabilidade).",
         },
+        {
+            "id": "openai",
+            "label": "OpenAI (gpt-4o-mini-tts)",
+            "description": "Endpoint /v1/audio/speech com vozes OpenAI e controle por instrucoes.",
+        },
+        {
+            "id": "minimax",
+            "label": "MiniMax Speech",
+            "description": "MiniMax T2A HTTP com modelos speech-2.8 e limite alto por requisicao.",
+        },
+        {
+            "id": "kokoro_local",
+            "label": "Local (Kokoro)",
+            "description": "Servidor local OpenAI-compatible em 127.0.0.1:8880.",
+        },
     ]
 
 
@@ -1974,8 +2550,302 @@ def _tts_provider_label(provider: str) -> str:
     return current
 
 
+PROVIDER_CATALOG: dict[str, Any] = {
+    "generation": {
+        "default_provider": "minimax",
+        "default_model": "MiniMax-M2.7-highspeed",
+        "providers": [
+            {
+                "id": "minimax",
+                "label": "MiniMax",
+                "base_url": MINIMAX_BASE_URL,
+                "uses_global_default_key": True,
+                "models": [
+                    {"id": "MiniMax-M2.7-highspeed", "label": "MiniMax M2.7 Highspeed", "tier": "fast", "default": True},
+                    {"id": "MiniMax-M2.7", "label": "MiniMax M2.7", "tier": "top"},
+                ],
+            },
+            {
+                "id": "openai",
+                "label": "OpenAI",
+                "base_url": OPENAI_BASE_URL,
+                "models": [
+                    {"id": "gpt-5.2", "label": "GPT-5.2", "tier": "top", "default": True},
+                    {"id": "gpt-5-mini", "label": "GPT-5 mini", "tier": "fast"},
+                    {"id": "gpt-4.1-mini", "label": "GPT-4.1 mini", "tier": "legacy_fast"},
+                    {"id": "gpt-5.5", "label": "GPT-5.5", "tier": "experimental", "disabled": True, "note": "Disponivel apenas quando a API da conta aceitar o model id."},
+                ],
+            },
+            {
+                "id": "deepseek",
+                "label": "DeepSeek",
+                "base_url": DEEPSEEK_BASE_URL,
+                "models": [
+                    {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro", "tier": "top", "default": True},
+                    {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash", "tier": "fast"},
+                ],
+            },
+            {
+                "id": "claude",
+                "label": "Claude (Anthropic)",
+                "base_url": "https://api.anthropic.com",
+                "models": [
+                    {"id": "claude-opus-4-7", "label": "Claude Opus 4.7", "tier": "top", "default": True},
+                    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "tier": "balanced"},
+                    {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "tier": "fast"},
+                ],
+            },
+            {
+                "id": "gemini",
+                "label": "Gemini",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "models": [
+                    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview", "tier": "top", "default": True},
+                    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview", "tier": "fast"},
+                    {"id": "gemini-3.1-flash-lite-preview", "label": "Gemini 3.1 Flash Lite Preview", "tier": "mini"},
+                    {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "tier": "fallback"},
+                ],
+            },
+        ],
+    },
+    "embedding": {
+        "default_provider": "gemini",
+        "providers": [
+            {
+                "id": "gemini",
+                "label": "Gemini",
+                "base_url": "",
+                "models": [
+                    {"id": "gemini-embedding-001", "label": "Gemini Embedding 001", "default": True},
+                ],
+            },
+            {
+                "id": "openai",
+                "label": "OpenAI",
+                "base_url": "https://api.openai.com/v1",
+                "models": [
+                    {"id": "text-embedding-3-large", "label": "text-embedding-3-large", "tier": "top"},
+                    {"id": "text-embedding-3-small", "label": "text-embedding-3-small", "tier": "fast", "default": True},
+                ],
+            },
+            {
+                "id": "lm_studio",
+                "label": "LM Studio local",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "models": [
+                    {"id": "text-embedding-qwen3-embedding-0.6b", "label": "Qwen3 Embedding 0.6B", "default": True},
+                ],
+            },
+        ],
+    },
+    "tts": {
+        "default_provider": "minimax",
+        "providers": [
+            {
+                "id": "minimax",
+                "label": "MiniMax Speech",
+                "base_url": "https://api.minimax.io/v1/t2a_v2",
+                "uses_global_default_key": True,
+                "voices": [{"id": "Portuguese_Narrator", "label": "Portuguese Narrator", "default": True}],
+                "models": [
+                    {"id": "speech-2.8-hd", "label": "Speech 2.8 HD", "tier": "top", "default": True},
+                    {"id": "speech-2.8-turbo", "label": "Speech 2.8 Turbo", "tier": "fast"},
+                ],
+            },
+            {
+                "id": "openai",
+                "label": "OpenAI TTS",
+                "base_url": "https://api.openai.com/v1/audio/speech",
+                "voices": [{"id": "coral", "label": "Coral", "default": True}, {"id": "alloy", "label": "Alloy"}],
+                "models": [{"id": "gpt-4o-mini-tts", "label": "GPT-4o mini TTS", "default": True}],
+            },
+            {
+                "id": "gemini_native",
+                "label": "Gemini Native TTS",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "voices": [{"id": "charon", "label": "Charon", "default": True}, {"id": "kore", "label": "Kore"}],
+                "models": [
+                    {"id": "gemini-3.1-flash-tts-preview", "label": "Gemini 3.1 Flash TTS Preview", "tier": "fast", "default": True},
+                    {"id": "gemini-2.5-pro-preview-tts", "label": "Gemini 2.5 Pro Preview TTS", "tier": "top"},
+                ],
+            },
+            {
+                "id": "legacy_google",
+                "label": "Google TTS Legacy",
+                "base_url": LEGACY_TTS_ENDPOINT,
+                "voices": [{"id": "pt-BR-Neural2-B", "label": "pt-BR-Neural2-B", "default": True}],
+                "models": [{"id": "google-cloud-text-to-speech", "label": "Google Cloud Text-to-Speech", "default": True}],
+            },
+        ],
+    },
+}
+
+
+def _catalog_model_ids(section: str, provider: str) -> set[str]:
+    normalized_provider = str(provider or "").strip()
+    providers = PROVIDER_CATALOG.get(section, {}).get("providers", [])
+    for item in providers:
+        if str(item.get("id") or "").strip() == normalized_provider:
+            return {str(model.get("id") or "").strip() for model in item.get("models", []) if model.get("id")}
+    return set()
+
+
+def _catalog_provider_ids(section: str) -> set[str]:
+    return {str(item.get("id") or "").strip() for item in PROVIDER_CATALOG.get(section, {}).get("providers", [])}
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _validate_provider_key(provider: str, api_key: str, test_model: str | None, validate: bool) -> dict[str, Any]:
+    if not validate:
+        return {"validated": False, "model": test_model or ""}
+    normalized = _normalize_credential_provider(provider)
+    rq = sys.modules.get("rag.query")
+    old_values: dict[str, Any] = {}
+    if rq is not None:
+        for name in ("GEMINI_KEY", "OPENAI_KEY", "DEEPSEEK_KEY", "MINIMAX_KEY", "ANTHROPIC_KEY", "_CLIENT", "_ANTHROPIC_CLIENT"):
+            old_values[name] = getattr(rq, name, None)
+    try:
+        if normalized == "gemini":
+            return configure_gemini_api_key(api_key, validate=True, test_model=test_model or "gemini-3-flash-preview")
+        if normalized == "anthropic":
+            return configure_anthropic_api_key(api_key, validate=True, test_model=test_model or "claude-haiku-4-5-20251001")
+        if normalized in {"openai", "deepseek", "minimax"}:
+            if configure_openai_compatible_api_key is None:
+                return {"validated": False, "model": test_model or ""}
+            default_model = {
+                "openai": "gpt-5-mini",
+                "deepseek": "deepseek-v4-flash",
+                "minimax": "MiniMax-M2.7-highspeed",
+            }[normalized]
+            return configure_openai_compatible_api_key(
+                normalized,
+                api_key,
+                validate=True,
+                test_model=test_model or default_model,
+            )
+    finally:
+        if rq is not None:
+            for name, value in old_values.items():
+                setattr(rq, name, value)
+    raise RuntimeError("Provedor invalido.")
+
+
+@app.post("/api/auth/register")
+def auth_register_api(payload: AuthRegisterRequest) -> dict[str, Any]:
+    username = _normalize_username(payload.username)
+    allowlist = _authorized_users()
+    if username not in allowlist:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "user_not_authorized",
+                "message": "Usuario nao autorizado para criar conta nesta instalacao.",
+            },
+        )
+    with _AUTH_LOCK:
+        users_payload = _load_users()
+        users = users_payload.setdefault("users", {})
+        if username in users:
+            raise HTTPException(status_code=409, detail={"code": "user_exists", "message": "Usuario ja cadastrado."})
+        users[username] = {
+            "username": username,
+            "password": _hash_password(payload.password),
+            "created_at": _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
+        }
+        _save_users(users_payload)
+    session = _issue_session(username)
+    return {
+        "status": "ok",
+        "token": session["token"],
+        "expires_at": session["expires_at"],
+        "user": {"username": username},
+        "credentials": _credential_status_for_user(username),
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login_api(payload: AuthLoginRequest) -> dict[str, Any]:
+    username = _normalize_username(payload.username)
+    users_payload = _load_users()
+    user = users_payload.get("users", {}).get(username)
+    if not isinstance(user, dict) or not _verify_password(payload.password, user.get("password") or {}):
+        raise HTTPException(status_code=401, detail={"code": "invalid_login", "message": "Usuario ou senha invalidos."})
+    session = _issue_session(username)
+    return {
+        "status": "ok",
+        "token": session["token"],
+        "expires_at": session["expires_at"],
+        "user": {"username": username},
+        "credentials": _credential_status_for_user(username),
+    }
+
+
+@app.post("/api/auth/logout")
+def auth_logout_api(request: Request) -> dict[str, Any]:
+    token = _bearer_token(request)
+    if token:
+        with _AUTH_LOCK:
+            _AUTH_SESSIONS.pop(token, None)
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me")
+def auth_me_api(request: Request) -> dict[str, Any]:
+    username = _current_username(request)
+    return {
+        "status": "ok",
+        "user": {"username": username},
+        "credentials": _credential_status_for_user(username),
+    }
+
+
+@app.get("/api/providers/catalog")
+def providers_catalog_api() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "catalog": copy.deepcopy(PROVIDER_CATALOG),
+        "defaults": {
+            "generation_provider": "minimax",
+            "generation_model": "MiniMax-M2.7-highspeed",
+            "generation_fallback_model": "MiniMax-M2.7-highspeed",
+            "tts_provider": "minimax",
+            "tts_model": "speech-2.8-hd",
+            "embedding_provider": "gemini",
+            "embedding_model": "gemini-embedding-001",
+        },
+    }
+
+
+@app.get("/api/providers/credentials/status")
+def providers_credentials_status_api(request: Request) -> dict[str, Any]:
+    username = _current_username(request)
+    return {"status": "ok", "credentials": _credential_status_for_user(username)}
+
+
+@app.post("/api/providers/credentials")
+def providers_credentials_api(payload: ProviderCredentialRequest, request: Request) -> dict[str, Any]:
+    username = _current_username(request)
+    provider = _normalize_credential_provider(payload.provider)
+    if provider not in AUTH_PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail={"code": "invalid_provider", "message": "Provedor invalido."})
+    key = payload.api_key.strip()
+    try:
+        validation = _validate_provider_key(provider, key, payload.test_model, payload.validate_key)
+    except Exception as exc:
+        _raise_api_error(exc)
+    _store_user_provider_key(username, provider, key)
+    return {
+        "status": "ok",
+        "provider": "claude" if provider == "anthropic" else provider,
+        "saved": True,
+        "validated": bool(validation.get("validated")),
+        "test_model": validation.get("model") or payload.test_model,
+        "credentials": _credential_status_for_user(username),
+    }
 
 
 def _safe_json_load(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -2101,7 +2971,7 @@ def _list_available_sources_payload() -> dict[str, Any]:
     sources: list[dict[str, Any]] = [
         {
             "id": "ratio",
-            "label": "Base Ratio (STF/STJ)",
+            "label": "Base DataJus (STF/STJ)",
             "kind": "ratio",
             "deleted": False,
             "doc_count": None,
@@ -3808,29 +4678,16 @@ def _embed_user_chunks(chunks: list[str]) -> list[list[float]]:
     http_client = _get_acervo_httpx_client(timeout_ms)
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start : start + batch_size]
-        result = _run_with_hard_timeout(
+        batch_vectors = _run_with_hard_timeout(
             label="acervo_embed_batch",
             timeout_ms=timeout_ms,
-            operation=lambda: get_gemini_client().models.embed_content(
-                model=USER_ACERVO_EMBED_MODEL,
-                contents=batch,
-                config=types.EmbedContentConfig(
-                    task_type="RETRIEVAL_DOCUMENT",
-                    output_dimensionality=USER_ACERVO_EMBED_DIM,
-                    http_options=types.HttpOptions(
-                        timeout=timeout_ms,
-                        retry_options=types.HttpRetryOptions(attempts=retry_attempts),
-                        httpx_client=http_client,
-                    ),
-                ),
-            ),
+            operation=lambda: embed_texts(batch, task_type="RETRIEVAL_DOCUMENT"),
         )
-        embeddings = getattr(result, "embeddings", None) or []
-        for e in embeddings:
-            vals = getattr(e, "values", None)
-            if vals is None:
+        for vals in batch_vectors:
+            if len(vals) != int(USER_ACERVO_EMBED_DIM):
                 raise RuntimeError(
-                    f"Embedding retornou objeto sem 'values': {type(e).__name__}"
+                    f"Embedding retornou {len(vals)} dimensoes, mas o acervo espera {int(USER_ACERVO_EMBED_DIM)}. "
+                    "Use o mesmo provedor/modelo da indexacao ou recrie o acervo."
                 )
             vectors.append(list(vals))
         if start + batch_size < len(chunks):
@@ -4206,9 +5063,19 @@ def _install_id() -> str:
 def health() -> dict[str, Any]:
     rw = get_reranker_warning()
     version_info = load_local_version(PROJECT_ROOT)
+    provider = (GENERATION_PROVIDER or "gemini").strip().lower()
+    provider_key_status = {
+        "gemini": has_gemini_api_key(),
+        "claude": has_anthropic_api_key(),
+        "openai": has_openai_api_key(),
+        "deepseek": has_deepseek_api_key(),
+        "minimax": has_minimax_api_key(),
+    }
     return {
         "status": "ok",
         "has_gemini_api_key": has_gemini_api_key(),
+        "generation_provider": provider,
+        "has_generation_api_key": bool(provider_key_status.get(provider, False)),
         "install_id": _install_id(),
         "version": str(version_info.get("version", "")),
         "build": int(version_info.get("build", 0) or 0),
@@ -4270,8 +5137,28 @@ def tts_config_update_api(payload: TTSProviderConfigRequest) -> dict[str, Any]:
         )
 
     provider = _normalize_tts_provider(raw_provider)
-    global TTS_PROVIDER
+    model = str(payload.model or "").strip()
+    voice = str(payload.voice or "").strip()
+    if model and model not in _catalog_model_ids("tts", provider):
+        raise HTTPException(status_code=400, detail={"code": "invalid_tts_model", "message": "Modelo de TTS invalido."})
+    global TTS_PROVIDER, TTS_MODEL, TTS_VOICE_NAME, OPENAI_TTS_MODEL, OPENAI_TTS_VOICE, MINIMAX_TTS_MODEL, MINIMAX_TTS_VOICE, LEGACY_TTS_VOICE_NAME
     TTS_PROVIDER = provider
+    if model:
+        if provider == "gemini_native":
+            TTS_MODEL = model
+        elif provider == "openai":
+            OPENAI_TTS_MODEL = model
+        elif provider == "minimax":
+            MINIMAX_TTS_MODEL = model
+    if voice:
+        if provider == "gemini_native":
+            TTS_VOICE_NAME = voice
+        elif provider == "openai":
+            OPENAI_TTS_VOICE = voice
+        elif provider == "minimax":
+            MINIMAX_TTS_VOICE = voice
+        elif provider == "legacy_google":
+            LEGACY_TTS_VOICE_NAME = voice
 
     if payload.persist_env:
         _upsert_env_tts_provider(provider)
@@ -4289,7 +5176,7 @@ def tts_config_update_api(payload: TTSProviderConfigRequest) -> dict[str, Any]:
 
 
 @app.post("/api/gemini/config")
-def gemini_config_api(payload: GeminiConfigRequest) -> dict[str, Any]:
+def gemini_config_api(payload: GeminiConfigRequest, request: Request) -> dict[str, Any]:
     key = payload.api_key.strip()
     if not key:
         raise HTTPException(
@@ -4328,14 +5215,13 @@ def gemini_config_api(payload: GeminiConfigRequest) -> dict[str, Any]:
         else:
             _raise_api_error(exc)
 
-    if payload.persist_env:
-        _upsert_env_gemini_key(key)
+    _store_user_provider_key(_current_username(request), "gemini", key)
     return {
         "status": "ok",
         "saved": True,
         "validated": bool(validated),
         "test_model": setup_result.get("model", payload.test_model),
-        "persisted_env": bool(payload.persist_env),
+        "persisted_env": False,
         "has_api_key": has_gemini_api_key(),
         "validation_timeout_ms": int(payload.validation_timeout_ms),
         "validation_warning": validation_warning,
@@ -4343,7 +5229,7 @@ def gemini_config_api(payload: GeminiConfigRequest) -> dict[str, Any]:
 
 
 @app.post("/api/anthropic/config")
-def anthropic_config_api(payload: AnthropicConfigRequest) -> dict[str, Any]:
+def anthropic_config_api(payload: AnthropicConfigRequest, request: Request) -> dict[str, Any]:
     key = payload.api_key.strip()
     if not key:
         raise HTTPException(
@@ -4378,14 +5264,13 @@ def anthropic_config_api(payload: AnthropicConfigRequest) -> dict[str, Any]:
         else:
             _raise_api_error(exc)
 
-    if payload.persist_env:
-        _upsert_env_anthropic_key(key)
+    _store_user_provider_key(_current_username(request), "anthropic", key)
     return {
         "status": "ok",
         "saved": True,
         "validated": bool(validated),
         "test_model": setup_result.get("model", payload.test_model),
-        "persisted_env": bool(payload.persist_env),
+        "persisted_env": False,
         "has_api_key": has_anthropic_api_key(),
         "supported_models": get_supported_claude_models(),
         "validation_warning": validation_warning,
@@ -4400,6 +5285,105 @@ def anthropic_status_api() -> dict[str, Any]:
         "has_api_key": has_anthropic_api_key(),
         "supported_models": get_supported_claude_models(),
     }
+
+
+@app.get("/api/providers/status")
+def providers_status_api(request: Request) -> dict[str, Any]:
+    creds = _credential_status_for_user(_current_username(request))
+    return {
+        "status": "ok",
+        "providers": {
+            "gemini": {"has_api_key": bool(creds["gemini"]), "models": list(_catalog_model_ids("generation", "gemini"))},
+            "claude": {"has_api_key": bool(creds["claude"]), "models": get_supported_claude_models()},
+            "openai": {"has_api_key": bool(creds["openai"]), "models": list(_catalog_model_ids("generation", "openai"))},
+            "deepseek": {"has_api_key": bool(creds["deepseek"]), "models": list(_catalog_model_ids("generation", "deepseek"))},
+            "minimax": {"has_api_key": bool(creds["minimax"] or creds["minimax_global"]), "models": list(_catalog_model_ids("generation", "minimax"))},
+        },
+        "embedding": {
+            "provider": EMBEDDING_PROVIDER,
+            "model": EMBED_MODEL,
+            "base_url": EMBEDDING_BASE_URL,
+            "dimension": EMBED_DIM,
+        },
+    }
+
+
+@app.post("/api/providers/config")
+def providers_config_api(payload: OpenAICompatibleConfigRequest, request: Request) -> dict[str, Any]:
+    provider = str(payload.provider or "").strip().lower()
+    key = payload.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail={"code": "missing_api_key", "message": "Chave ausente."})
+    try:
+        setup_result = configure_openai_compatible_api_key(
+            provider,
+            key,
+            validate=payload.validate_key,
+            test_model=payload.test_model,
+            validation_timeout_ms=payload.validation_timeout_ms,
+        )
+    except Exception as exc:
+        _raise_api_error(exc)
+    _store_user_provider_key(_current_username(request), provider, key)
+    return {
+        "status": "ok",
+        "provider": provider,
+        "saved": True,
+        "validated": bool(setup_result.get("validated")),
+        "test_model": setup_result.get("model", payload.test_model),
+        "persisted_env": False,
+    }
+
+
+@app.get("/api/embedding/config")
+def embedding_config_status_api() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "provider": EMBEDDING_PROVIDER,
+        "model": EMBED_MODEL,
+        "base_url": EMBEDDING_BASE_URL,
+        "dimension": EMBED_DIM,
+        "options": [
+            {"id": "gemini", "label": "Gemini", "default_model": "gemini-embedding-001"},
+            {"id": "lm_studio", "label": "LM Studio local", "default_model": "text-embedding-qwen3-embedding-0.6b"},
+            {"id": "openai_compatible", "label": "OpenAI-compatible", "default_model": "text-embedding-qwen3-embedding-0.6b"},
+            {"id": "openai", "label": "OpenAI", "default_model": "text-embedding-3-small"},
+        ],
+    }
+
+
+@app.post("/api/embedding/config")
+def embedding_config_update_api(payload: EmbeddingConfigRequest, request: Request) -> dict[str, Any]:
+    provider = str(payload.provider or "").strip()
+    if provider not in _catalog_provider_ids("embedding"):
+        raise HTTPException(status_code=400, detail={"code": "invalid_embedding_provider", "message": "Provedor de embedding invalido."})
+    if payload.model not in _catalog_model_ids("embedding", provider):
+        raise HTTPException(status_code=400, detail={"code": "invalid_embedding_model", "message": "Modelo de embedding invalido."})
+    key = str(payload.api_key or "").strip()
+    if key:
+        _store_user_provider_key(_current_username(request), provider, key)
+    try:
+        if configure_embedding_provider is None:
+            raise RuntimeError("Configuracao de embedding indisponivel neste runtime.")
+        result = configure_embedding_provider(
+            provider,
+            model=payload.model,
+            base_url=payload.base_url,
+            api_key=None,
+        )
+    except Exception as exc:
+        _raise_api_error(exc)
+
+    if payload.persist_env:
+        values = {
+            "EMBEDDING_PROVIDER": result["provider"],
+            "EMBED_MODEL": result["model"],
+        }
+        if result.get("base_url"):
+            values["EMBEDDING_BASE_URL"] = str(result["base_url"])
+        _upsert_env_values(values)
+
+    return {"status": "ok", "saved": True, "persisted_env": bool(payload.persist_env), **result}
 
 
 @app.get("/api/rag-config")
@@ -4722,25 +5706,26 @@ def query_api(payload: QueryRequest, request: Request) -> dict[str, Any]:
         window_seconds=60,
     )
     try:
-        answer, docs, meta = run_query(
-            query=payload.query,
-            tribunais=payload.tribunais,
-            tipos=payload.tipos,
-            sources=payload.sources,
-            prefer_recent=payload.prefer_recent,
-            prefer_user_sources=payload.prefer_user_sources,
-            reranker_backend=payload.reranker_backend,
-            ramos=payload.ramos,
-            orgaos=payload.orgaos,
-            relator_contains=payload.relator_contains,
-            date_from=payload.date_from,
-            date_to=payload.date_to,
-            rag_config=payload.rag_config,
-            persona=payload.persona,
-            persona_prompt=payload.persona_prompt,
-            trace=payload.trace,
-            return_meta=True,
-        )
+        with _request_credentials_context(_current_username(request)):
+            answer, docs, meta = run_query(
+                query=payload.query,
+                tribunais=payload.tribunais,
+                tipos=payload.tipos,
+                sources=payload.sources,
+                prefer_recent=payload.prefer_recent,
+                prefer_user_sources=payload.prefer_user_sources,
+                reranker_backend=payload.reranker_backend,
+                ramos=payload.ramos,
+                orgaos=payload.orgaos,
+                relator_contains=payload.relator_contains,
+                date_from=payload.date_from,
+                date_to=payload.date_to,
+                rag_config=payload.rag_config,
+                persona=payload.persona,
+                persona_prompt=payload.persona_prompt,
+                trace=payload.trace,
+                return_meta=True,
+            )
     except Exception as exc:
         _raise_api_error(exc)
 
@@ -4772,26 +5757,27 @@ def query_stream_api(payload: QueryRequest, request: Request) -> StreamingRespon
 
     def worker() -> None:
         try:
-            answer, docs, meta = run_query(
-                query=payload.query,
-                tribunais=payload.tribunais,
-                tipos=payload.tipos,
-                sources=payload.sources,
-                prefer_recent=payload.prefer_recent,
-                prefer_user_sources=payload.prefer_user_sources,
-                reranker_backend=payload.reranker_backend,
-                ramos=payload.ramos,
-                orgaos=payload.orgaos,
-                relator_contains=payload.relator_contains,
-                date_from=payload.date_from,
-                date_to=payload.date_to,
-                rag_config=payload.rag_config,
-                persona=payload.persona,
-                persona_prompt=payload.persona_prompt,
-                trace=payload.trace,
-                stage_callback=stage_callback,
-                return_meta=True,
-            )
+            with _request_credentials_context(_current_username(request)):
+                answer, docs, meta = run_query(
+                    query=payload.query,
+                    tribunais=payload.tribunais,
+                    tipos=payload.tipos,
+                    sources=payload.sources,
+                    prefer_recent=payload.prefer_recent,
+                    prefer_user_sources=payload.prefer_user_sources,
+                    reranker_backend=payload.reranker_backend,
+                    ramos=payload.ramos,
+                    orgaos=payload.orgaos,
+                    relator_contains=payload.relator_contains,
+                    date_from=payload.date_from,
+                    date_to=payload.date_to,
+                    rag_config=payload.rag_config,
+                    persona=payload.persona,
+                    persona_prompt=payload.persona_prompt,
+                    trace=payload.trace,
+                    stage_callback=stage_callback,
+                    return_meta=True,
+                )
             event_queue.put(
                 {
                     "event": "result",
@@ -4838,15 +5824,16 @@ def query_stream_api(payload: QueryRequest, request: Request) -> StreamingRespon
 
 
 @app.post("/api/explain")
-def explain_api(payload: ExplainRequest) -> dict[str, Any]:
+def explain_api(payload: ExplainRequest, request: Request) -> dict[str, Any]:
     try:
-        explanation = explain_answer(
-            query=payload.query,
-            answer=payload.answer,
-            docs=payload.docs or [],
-            model_name=payload.model_name or EXPLAIN_MODEL,
-            generation_provider=payload.generation_provider or "gemini",
-        )
+        with _request_credentials_context(_current_username(request)):
+            explanation = explain_answer(
+                query=payload.query,
+                answer=payload.answer,
+                docs=payload.docs or [],
+                model_name=payload.model_name or EXPLAIN_MODEL,
+                generation_provider=payload.generation_provider or "gemini",
+            )
     except Exception as exc:
         _raise_api_error(exc)
     return {"explanation": explanation}
@@ -4862,7 +5849,8 @@ def tts_api(payload: TTSRequest, request: Request) -> dict[str, Any]:
     )
     trace_id = _new_trace_id()
     try:
-        synthesized = _synthesize_tts(payload.text, trace_id=trace_id)
+        with _request_credentials_context(_current_username(request)):
+            synthesized = _synthesize_tts(payload.text, trace_id=trace_id)
     except Exception as exc:
         _raise_api_error(exc, trace_id=trace_id)
     if isinstance(synthesized, tuple):
@@ -4898,23 +5886,24 @@ def tts_stream_api(payload: TTSRequest, request: Request) -> StreamingResponse:
     def worker() -> None:
         emitted = 0
         try:
-            for audio_bytes, mime_type, chunk_index, total_chunks in _stream_tts_chunks(
-                payload.text,
-                trace_id=trace_id,
-            ):
-                emitted += 1
-                event_queue.put(
-                    {
-                        "event": "chunk",
-                        "trace_id": trace_id,
-                        "index": int(chunk_index),
-                        "total": int(total_chunks),
-                        "mime_type": str(mime_type or "audio/wav"),
-                        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-                        "voice": _tts_response_voice(),
-                        "provider": TTS_PROVIDER,
-                    }
-                )
+            with _request_credentials_context(_current_username(request)):
+                for audio_bytes, mime_type, chunk_index, total_chunks in _stream_tts_chunks(
+                    payload.text,
+                    trace_id=trace_id,
+                ):
+                    emitted += 1
+                    event_queue.put(
+                        {
+                            "event": "chunk",
+                            "trace_id": trace_id,
+                            "index": int(chunk_index),
+                            "total": int(total_chunks),
+                            "mime_type": str(mime_type or "audio/wav"),
+                            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                            "voice": _tts_response_voice(),
+                            "provider": TTS_PROVIDER,
+                        }
+                    )
             event_queue.put(
                 {
                     "event": "done",

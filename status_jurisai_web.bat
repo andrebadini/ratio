@@ -3,14 +3,14 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 
 cd /d "%~dp0"
-title Ratio - Pesquisa Jurisprudencial (Status)
+title DataJus - Pesquisa Jurisprudencial (Status)
 
 set "RUNTIME_DIR=%CD%\logs\runtime"
 set "BACKEND_PID_FILE=%RUNTIME_DIR%\backend.pid"
 set "FRONTEND_PID_FILE=%RUNTIME_DIR%\frontend.pid"
 
 echo ============================================================
-echo Ratio - Status de Execucao
+echo DataJus - Status de Execucao
 echo ============================================================
 echo.
 

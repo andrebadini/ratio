@@ -1,4 +1,4 @@
-# Ratio - Pesquisa Jurisprudencial
+# DataJus - Pesquisa Jurisprudencial
 
 Assistente juridico local para pesquisa de jurisprudencia STF/STJ, com suporte a:
 - busca hibrida (semantica + lexical),
@@ -38,13 +38,13 @@ flowchart LR
 
 ### Dois modos de uso
 
-1. Usuario final (recomendado): executa `Ratio.exe` a partir da pasta `dist\Ratio\`.
+1. Usuario final (recomendado): executa `DataJus.exe` a partir da pasta `dist\DataJus\`.
 2. Desenvolvimento: roda backend/frontend manualmente com Python.
 
 Download do pacote Windows:
 <https://drive.google.com/file/d/1mQ6wwpNA2J_iRd7rfBscR062MWijR02-/view?usp=sharing>
 
-Versao da landing page em producao (`ratiojuris.me`): v2026.03.05 (deploy em 05/03/2026). Atualizacoes locais mais recentes podem ainda nao estar publicadas.
+Versao da landing page em producao (``): v2026.03.05 (deploy em 05/03/2026). Atualizacoes locais mais recentes podem ainda nao estar publicadas.
 
 ---
 
@@ -81,7 +81,7 @@ py -m pip install -r requirements.txt
 ### Para usuario final (executavel)
 
 - Windows 10/11
-- Pasta `dist\Ratio\` completa (nao apenas o `.exe`)
+- Pasta `dist\DataJus\` completa (nao apenas o `.exe`)
 - Chave Gemini configurada no onboarding ou via `.env`
 
 ---
@@ -99,23 +99,23 @@ O script prioriza `Python 3.12` (via `py -3.12`) e usa `py` como fallback.
 Ao final, o executavel fica em:
 
 ```text
-dist\Ratio\Ratio.exe
+dist\DataJus\DataJus.exe
 ```
 
 No computador final, o usuario nao precisa de Python instalado.
-O build inclui `lancedb_store` em `dist\Ratio\` e gera backup preventivo de banco em `build\database_backups\` quando aplicavel.
+O build inclui `lancedb_store` em `dist\DataJus\` e gera backup preventivo de banco em `build\database_backups\` quando aplicavel.
 
 ### Distribuicao recomendada
 
-1. Compactar e enviar a pasta inteira `dist\Ratio\`.
+1. Compactar e enviar a pasta inteira `dist\DataJus\`.
 2. Manter estrutura interna intacta (`_internal`, `lancedb_store`, `logs`).
-3. Usuario final executa apenas `Ratio.exe`.
+3. Usuario final executa apenas `DataJus.exe`.
 
 ---
 
 ## Manual de Operacao e Pesquisa
 
-O manual completo do Ratio esta disponivel online:
+O manual completo do DataJus esta disponivel online:
 - [Manual de Operacao e Pesquisa (Google Docs)](https://docs.google.com/document/d/1rZ2XNo0eouUoUJuacjetvBbXDJZ6jcx8/edit?usp=sharing&ouid=113759300308613331484&rtpof=true&sd=true)
 
 O documento tambem esta disponivel na raiz do projeto como `Ratio_Manual_de_Operacao_e_Pesquisa.docx`.
@@ -124,8 +124,8 @@ O documento tambem esta disponivel na raiz do projeto como `Ratio_Manual_de_Oper
 
 ## Primeiro uso (usuario final)
 
-1. Extraia o ZIP para uma pasta local, por exemplo `C:\Ratio`.
-2. Execute `Ratio.exe`.
+1. Extraia o ZIP para uma pasta local, por exemplo `C:\DataJus`.
+2. Execute `DataJus.exe`.
 3. Aguarde abrir no navegador `http://127.0.0.1:5500`.
 4. No modal inicial, informe a chave Gemini.
 5. Rode uma consulta de teste.
@@ -135,7 +135,7 @@ O documento tambem esta disponivel na raiz do projeto como `Ratio_Manual_de_Oper
 
 | Sintoma | Causa comum | Acao |
 |---|---|---|
-| `Failed to fetch` no frontend | backend local nao iniciou | rodar `Ratio.exe` via terminal e verificar erros |
+| `Failed to fetch` no frontend | backend local nao iniciou | rodar `DataJus.exe` via terminal e verificar erros |
 | `http://127.0.0.1:8000/health` nao abre | porta 8000 bloqueada/ocupada ou backend caiu | checar firewall/antivirus/processo em 8000 |
 | travado em `Loading reranker model...` no primeiro uso | download/carga inicial do modelo local | aguardar; nas proximas consultas tende a ser bem mais rapido |
 
@@ -213,7 +213,7 @@ Valores podem mudar. Sempre confirme na tabela oficial.
 
 Notas:
 - Limites RPM/TPM/RPD dependem do modelo e tier da conta.
-- O Ratio usa embeddings e geracao; monitore consumo antes de lotes grandes.
+- O DataJus usa embeddings e geracao; monitore consumo antes de lotes grandes.
 
 ---
 
@@ -292,24 +292,64 @@ py -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-re
 
 ## Como executar a aplicacao
 
+### Script macOS/Linux para iniciar ou reiniciar
+
+Na pasta `ratio/`, use o script `datajus_server.sh` para controlar backend e frontend locais.
+Quando existir `.venv/bin/python`, o script usa automaticamente esse Python do projeto; caso contrario, usa `python3` ou `python` do PATH.
+
+Iniciar, sem duplicar processos ja ativos:
+
+```bash
+./datajus_server.sh start
+```
+
+Reiniciar backend e frontend gerenciados pelo script:
+
+```bash
+./datajus_server.sh restart
+```
+
+Verificar status:
+
+```bash
+./datajus_server.sh status
+```
+
+Desligar:
+
+```bash
+./datajus_server.sh stop
+```
+
+O script usa por padrao:
+- backend FastAPI em `http://127.0.0.1:8000`;
+- frontend estatico em `http://127.0.0.1:5500`;
+- logs e PIDs em `logs/runtime/`.
+
+Se alguma porta estiver ocupada por outro processo, o script informa o PID e nao encerra o processo automaticamente. Para trocar portas em desenvolvimento:
+
+```bash
+DATAJUS_BACKEND_PORT=8002 DATAJUS_FRONTEND_PORT=5502 ./datajus_server.sh start
+```
+
 ### Scripts Windows (recomendado)
 
 Menu de controle:
 
 ```text
-controle_jurisai_web.bat
+1 - RATIO - CONTROLE.bat
 ```
 
 Iniciar:
 
 ```text
-iniciar_jurisai_web.bat
+RATIO - INICIAR.bat
 ```
 
 Desligar:
 
 ```text
-desligar_jurisai_web.bat
+RATIO - DESLIGAR.bat
 ```
 
 Status:
@@ -346,11 +386,11 @@ curl http://127.0.0.1:8000/health
 
 1. Baixe o ZIP e extraia a pasta.
 2. Instale dependencias (`py -m pip install -r requirements.txt`) se estiver em modo desenvolvimento.
-3. Inicie com `controle_jurisai_web.bat` (opcao 1) ou `iniciar_jurisai_web.bat`.
+3. No Windows, inicie com `1 - RATIO - CONTROLE.bat` (opcao 1) ou `RATIO - INICIAR.bat`. No macOS/Linux, use `./datajus_server.sh start`.
 4. No primeiro acesso, configure a chave Gemini no onboarding.
 5. Ajuste modelos/pesos e clique em **Salvar ajustes**.
 6. Faça as consultas.
-7. Para encerrar, use `controle_jurisai_web.bat` (opcao 2) ou `desligar_jurisai_web.bat`.
+7. Para encerrar, use `1 - RATIO - CONTROLE.bat` (opcao 2), `RATIO - DESLIGAR.bat` ou `./datajus_server.sh stop`.
 
 ## Atualizacao automatica da base oficial (2026+)
 
@@ -403,7 +443,7 @@ Daqui em diante, qualquer mudanca que precise chegar aos usuarios deve ser pensa
 Regra operacional:
 
 - se a mudanca nao puder ser entregue pelo fluxo de atualizacao do frontend, ela nao deve ser considerada pronta para release aos usuarios;
-- nao assumir rebuild local de `Ratio.exe` como solucao para rollout normal;
+- nao assumir rebuild local de `DataJus.exe` como solucao para rollout normal;
 - o que funciona localmente para desenvolvimento precisa ser validado tambem no formato consumido por quem ja instalou o app;
 - mudancas em `lancedb_store/` ou outros artefatos de runtime so podem ir para release quando o manifesto de atualizacao incluir esses arquivos, ou quando a release for marcada explicitamente como exigindo instalacao completa.
 
@@ -436,8 +476,8 @@ Principais arquivos de runtime:
 - `logs/runtime/meu_acervo_manifest.json`
 
 Arquivos de build:
-- `build/Ratio/warn-Ratio.txt`
-- `build/Ratio/xref-Ratio.html`
+- `build/DataJus/warn-DataJus.txt`
+- `build/DataJus/xref-DataJus.html`
 
 ---
 
@@ -474,25 +514,8 @@ py -m pytest -q tests/test_juris_update_metadata.py
 
 ---
 
-## Apoio ao projeto
-
-Se o Ratio for util no seu fluxo de pesquisa, seu apoio ajuda a manter e evoluir a plataforma.
-
-- GitHub Sponsors: <https://github.com/sponsors/carlosvictorodrigues>
-- Instagram: `@carlosvictorodrigues`
-- E-mail: `contato@ratiojuris.me`
-- PIX (copia e cola):
-
-```text
-00020126920014BR.GOV.BCB.PIX013607cdc77f-cd4b-44b8-a910-a254f58642f40230Apoie o Ratio - Jurisprudencia5204000053039865802BR5925Carlos Victor de Oliveira6009SAO PAULO621405102qCvdJp89F6304E670
-```
-
-O QR Code de apoio tambem esta na interface (modal "Sobre o Ratio", aba "Autor").
-
----
-
 ## Aviso legal
 
-O Ratio e um assistente de pesquisa.
+O DataJus e um assistente de pesquisa.
 Nao substitui consultoria juridica formal.
 Sempre valide fontes primarias antes de decidir estrategicamente.

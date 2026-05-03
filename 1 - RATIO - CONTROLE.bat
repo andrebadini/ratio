@@ -3,12 +3,12 @@ setlocal EnableExtensions
 chcp 65001 >nul
 
 cd /d "%~dp0"
-title Ratio - Controle Web
+title DataJus - Controle Web
 
 :MENU
 cls
 echo ============================================================
-echo Ratio - Controle Rapido (Web)
+echo DataJus - Controle Rapido (Web)
 echo ============================================================
 echo [1] Ligar aplicacao (backend + frontend)
 echo [2] Desligar aplicacao

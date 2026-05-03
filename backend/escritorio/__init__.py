@@ -1,1 +1,1 @@
-"""Bounded context do Ratio Escritorio."""
+"""Bounded context do DataJus Escritorio."""

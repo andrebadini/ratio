@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate update-manifest.json for the Ratio delta-update system.
+"""Generate update-manifest.json for the DataJus delta-update system.
 
 Scans backend/, rag/, frontend/, and root-level config files, computes
 SHA-256 hashes, and produces a manifest that auto_update.py consumes.
@@ -23,11 +23,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-GITHUB_REPO = "carlosvictorodrigues/ratio"
+GITHUB_REPO = os.getenv("DATAJUS_UPDATE_REPO", "")
 
 # Directories and files to include in delta updates.
 # These are the patchable source files — NOT binaries or data.
@@ -138,12 +139,12 @@ def build_manifest(
 
     files = collect_files(project_root, runtime_paths=runtime_paths)
 
-    # Add download URLs pointing to GitHub Release assets
-    base_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag}"
+    # Add release asset URLs when a repository is configured.
+    base_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag}" if GITHUB_REPO else ""
     for f in files:
         # GitHub Release assets use flat names, so we replace / with --
         asset_name = f["path"].replace("/", "--")
-        f["url"] = f"{base_url}/{asset_name}"
+        f["url"] = f"{base_url}/{asset_name}" if base_url else ""
 
     manifest = {
         "version": version,
@@ -159,7 +160,7 @@ def build_manifest(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate Ratio update manifest")
+    parser = argparse.ArgumentParser(description="Generate DataJus update manifest")
     parser.add_argument("--tag", required=True, help="GitHub Release tag (e.g. v2026.03.18)")
     parser.add_argument("--notes", default="", help="Release notes text")
     parser.add_argument("--needs-full-installer", action="store_true",

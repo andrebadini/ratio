@@ -103,7 +103,7 @@ def test_onboarding_modal_and_about_sections_exist_in_layout():
     html = _read("frontend/index.html")
     assert 'id="onboardingModal"' in html
     assert 'id="closeOnboardingBtn"' in html
-    assert "Primeiros passos com API Gemini" in html
+    assert "Primeiros passos com provedores de IA" in html
 
 
 def test_onboarding_supports_one_time_gemini_key_setup():
@@ -112,19 +112,17 @@ def test_onboarding_supports_one_time_gemini_key_setup():
     assert 'id="onboardingApiKeyInput"' in html
     assert 'id="onboardingSaveKeyBtn"' in html
     assert 'id="onboardingKeyStatus"' in html
-    assert "/api/gemini/config" in js
+    assert "/api/providers/credentials" in js
     assert "onboardingSaveKeyBtn" in js
 
 
 def test_onboarding_pricing_cards_translate_request_impact():
     html = _read("frontend/index.html")
     assert "Reranker local" in html
-    assert "Reranker Gemini" in html
-    assert "requisicoes por consulta" in html.lower()
-    assert "cota gratuita" in html.lower()
-    assert "gemini-2.5-pro" in html
-    assert "gemini-embedding-001" not in html
-    assert "Estimativa por pergunta no Ratio" in html
+    assert "Reranker remoto" in html
+    assert "Fluxo por consulta" in html
+    assert "MiniMax-M2.7-highspeed" in html
+    assert "deepseek-v4-flash" in html
 
 
 def test_about_modal_replaces_about_sections_in_settings():
@@ -133,15 +131,15 @@ def test_about_modal_replaces_about_sections_in_settings():
     assert 'id="aboutModal"' in html
     assert 'id="aboutTabs"' in html
     assert "Sobre o acervo" in html
-    assert "Sobre o autor e apoio" in html
-    assert "<strong>Instagram:</strong>" in html
-    assert "<strong>E-mail:</strong>" in html
-    assert "apoio-pix.jpeg" in html
-    assert 'id="pixKeyText"' in html
+    assert "Privacidade" in html
+    assert "<strong>Instagram:</strong>" not in html
+    assert "<strong>E-mail:</strong>" not in html
+    assert "apoio-pix.jpeg" not in html
+    assert 'id="pixKeyText"' not in html
 
     settings_slice = html.split('<aside id="settingsPanel"', 1)[1]
     assert "<summary>Sobre o acervo</summary>" not in settings_slice
-    assert "<summary>Sobre o autor e apoio</summary>" not in settings_slice
+    assert "<summary>Privacidade</summary>" not in settings_slice
 
 
 def test_about_structure_tab_shows_document_counts():
@@ -160,11 +158,11 @@ def test_about_structure_tab_shows_document_counts():
     assert "16.300 documentos" in html
 
 
-def test_about_author_copy_mentions_free_access_for_students_and_professionals():
+def test_about_privacy_copy_mentions_external_providers_and_local_execution():
     html = _read("frontend/index.html")
-    assert "gratuito" in html
-    assert "estudantes e profissionais" in html
-    assert "nao podem assumir assinaturas pagas" in html
+    assert "provedores externos de LLM, TTS e embeddings" in html
+    assert "Execução local" in html
+    assert "Chamadas externas acontecem apenas quando um provedor de nuvem é selecionado." in html
 
 
 def test_onboarding_state_and_controls_exist_in_frontend_logic():
@@ -215,18 +213,18 @@ def test_rag_config_version_migration_hooks_exist_in_frontend_state():
 
 
 def test_onboarding_key_error_message_points_user_to_api_key_guide():
-    js = _read("frontend/app.js")
-    assert "Guia de API key" in js
-    assert "https://ai.google.dev/gemini-api/docs/api-key" in js
+    html = _read("frontend/index.html")
+    assert "MiniMax API" in html
+    assert "https://platform.minimax.io/docs/api-reference/api-overview" in html
 
 
 def test_onboarding_key_validation_has_elapsed_feedback_and_timeout():
     js = _read("frontend/app.js")
     assert "ONBOARDING_KEY_VALIDATE_TIMEOUT_MS" in js
     assert "ONBOARDING_KEY_STATUS_PULSE_MS" in js
-    assert "Validando chave Gemini..." in js
+    assert "Validando ${keyLabel}" in js
     assert "A validacao da chave esta demorando" in js
-    assert "Ainda validando a chave Gemini" in js
+    assert "Ainda validando ${keyLabel}" in js
     assert "timeoutMs: ONBOARDING_KEY_VALIDATE_TIMEOUT_MS" in js
     assert "request_timeout" in js
 
@@ -298,7 +296,7 @@ def test_dossie_cards_support_full_document_open_on_card_click():
 def test_onboarding_timeout_falls_back_to_save_key_without_validation():
     js = _read("frontend/app.js")
     assert "fallbackSaveResult" in js
-    assert "Chave salva sem validacao online" in js
+    assert "Chave salva no seu usuario sem validacao online" in js
     assert "validate: false" in js
     assert "Falha ao salvar chave apos timeout de validacao" in js
 
@@ -325,14 +323,14 @@ def test_about_modal_logic_exists_in_frontend_js():
     assert "dataset.aboutOpen" in js
     assert "setAboutOpen" in js
     assert "openAboutBtns" in js
-    assert "copyPixKeyBtn" in js
+    assert "data-about-tab-target" in _read("frontend/index.html")
 
 
 def test_readme_contains_gemini_onboarding_cost_and_support_sections():
     readme = _read("README.md")
     assert "Gemini API onboarding (antes do primeiro uso)" in readme
     assert "Custos de referencia (snapshot 2026-02-24)" in readme
-    assert "Apoio ao projeto" in readme
+    assert "Assistente juridico local" in readme
 
 
 def test_settings_has_meu_acervo_controls():
@@ -362,7 +360,7 @@ def test_frontend_query_payload_includes_sources_and_user_priority():
 
 def test_frontend_native_sources_keep_tjsp_separate_from_ratio():
     html = _read("frontend/index.html")
-    assert "Base Ratio (STF/STJ/TJSP)" not in html
+    assert "Base DataJus (STF/STJ/TJSP)" not in html
     assert 'value="TJSP"' in html
 
 
@@ -452,8 +450,8 @@ def test_composer_status_strip_shows_only_api_and_version_slots():
     assert 'id="appVersionLabel"' in composer_slice
     assert "Contato" not in composer_slice
     assert "updateComposerHealthStatus" in js
-    assert "API Gemini ativa" in js
-    assert "API Gemini inativa" in js
+    assert "API ${label} ativa" in js
+    assert "API ${label} inativa" in js
 
 
 def test_health_check_no_longer_pushes_technical_stack_text_to_request_state():

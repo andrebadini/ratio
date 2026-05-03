@@ -402,7 +402,7 @@ def test_meu_acervo_sources_contract():
     }
     assert "ratio" in source_map
     assert "tjsp" in source_map
-    assert source_map["ratio"]["label"] == "Base Ratio (STF/STJ)"
+    assert source_map["ratio"]["label"] == "Base DataJus (STF/STJ)"
     assert source_map["tjsp"]["label"] == "TJSP Revistas"
     assert "default_selected" in payload
 
@@ -693,10 +693,10 @@ def test_tts_extract_converts_pcm_l16_into_wav():
     assert audio.startswith(b"RIFF")
 
 
-def test_tts_defaults_to_gemini_native_provider():
+def test_tts_defaults_to_minimax_provider():
     backend_main = _load_backend_with_stub()
-    assert backend_main.TTS_PROVIDER == "gemini_native"
-    assert backend_main.TTS_MODEL == "gemini-2.5-pro-preview-tts"
+    assert backend_main.TTS_PROVIDER == "minimax"
+    assert backend_main.TTS_MODEL == "speech-2.8-hd"
     assert backend_main.TTS_MAX_CHARS == 5000
 
 
@@ -711,31 +711,29 @@ def test_legacy_tts_module_uses_api_key_header_instead_of_query_param():
     assert "?key=" not in legacy_source
 
 
-def test_tts_dispatch_routes_to_gemini_provider_by_default():
+def test_tts_dispatch_routes_to_minimax_provider_by_default():
     backend_main = _load_backend_with_stub()
-    backend_main._synthesize_google_tts = lambda *_args, **_kwargs: (b"gemini-audio", "audio/wav")
+    backend_main._synthesize_minimax_tts = lambda *_args, **_kwargs: (b"minimax-audio", "audio/mpeg")
     backend_main._synthesize_legacy_google_tts = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         RuntimeError("should not call legacy path")
     )
 
     audio, mime = backend_main._synthesize_tts("teste", trace_id="trace001")
-    assert audio == b"gemini-audio"
-    assert mime == "audio/wav"
+    assert audio == b"minimax-audio"
+    assert mime == "audio/mpeg"
 
 
-def test_tts_stream_dispatch_routes_to_gemini_provider_by_default():
+def test_tts_stream_dispatch_routes_to_minimax_provider_by_default():
     backend_main = _load_backend_with_stub()
-    backend_main._stream_google_tts_chunks = lambda *_args, **_kwargs: iter(
-        [(b"gemini-chunk", "audio/wav", 1, 1)]
-    )
+    backend_main._synthesize_minimax_tts = lambda *_args, **_kwargs: (b"minimax-chunk", "audio/mpeg")
     backend_main._stream_legacy_tts_chunks = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         RuntimeError("should not call legacy stream path")
     )
 
     chunks = list(backend_main._stream_tts_chunks("teste", trace_id="trace002"))
     assert len(chunks) == 1
-    assert chunks[0][0] == b"gemini-chunk"
-    assert chunks[0][1] == "audio/wav"
+    assert chunks[0][0] == b"minimax-chunk"
+    assert chunks[0][1] == "audio/mpeg"
 
 
 def test_tts_sync_falls_back_to_legacy_when_gemini_fails():
@@ -889,12 +887,83 @@ def test_tts_config_status_contract():
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["provider"] in {"gemini_native", "legacy_google"}
+    assert payload["provider"] in {"gemini_native", "legacy_google", "minimax"}
     assert "env_path" not in payload
     options = payload.get("options", [])
     option_ids = {str(item.get("id")) for item in options if isinstance(item, dict)}
     assert "gemini_native" in option_ids
     assert "legacy_google" in option_ids
+
+
+def test_auth_register_requires_allowlisted_user(monkeypatch, tmp_path):
+    monkeypatch.setenv("RATIO_AUTHORIZED_USERS", "allowed@example.com")
+    backend_main = _load_backend_with_stub()
+    backend_main.AUTH_USERS_PATH = tmp_path / "users.json"
+    backend_main.AUTH_CREDENTIALS_PATH = tmp_path / "credentials.json"
+    backend_main.AUTH_SECRET_PATH = tmp_path / "secret.key"
+    client = TestClient(backend_main.app)
+
+    denied = client.post(
+        "/api/auth/register",
+        json={"username": "blocked@example.com", "password": "password123"},
+    )
+    assert denied.status_code == 403
+
+    created = client.post(
+        "/api/auth/register",
+        json={"username": "allowed@example.com", "password": "password123"},
+    )
+    assert created.status_code == 200
+    assert created.json()["token"]
+    stored = json.loads((tmp_path / "users.json").read_text(encoding="utf-8"))
+    password_payload = stored["users"]["allowed@example.com"]["password"]
+    assert password_payload["algorithm"] == "pbkdf2_sha256"
+    assert password_payload["hash"] != "password123"
+
+
+def test_auth_protects_api_when_allowlist_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("RATIO_AUTHORIZED_USERS", "allowed@example.com")
+    backend_main = _load_backend_with_stub()
+    backend_main.AUTH_USERS_PATH = tmp_path / "users.json"
+    backend_main.AUTH_CREDENTIALS_PATH = tmp_path / "credentials.json"
+    backend_main.AUTH_SECRET_PATH = tmp_path / "secret.key"
+    client = TestClient(backend_main.app)
+
+    assert client.get("/api/tts/config").status_code == 401
+    created = client.post(
+        "/api/auth/register",
+        json={"username": "allowed@example.com", "password": "password123"},
+    )
+    token = created.json()["token"]
+    response = client.get("/api/tts/config", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+
+def test_user_credentials_are_isolated_and_not_plaintext(monkeypatch, tmp_path):
+    monkeypatch.setenv("RATIO_AUTHORIZED_USERS", "a@example.com,b@example.com")
+    backend_main = _load_backend_with_stub()
+    backend_main.AUTH_USERS_PATH = tmp_path / "users.json"
+    backend_main.AUTH_CREDENTIALS_PATH = tmp_path / "credentials.json"
+    backend_main.AUTH_SECRET_PATH = tmp_path / "secret.key"
+    client = TestClient(backend_main.app)
+
+    token_a = client.post("/api/auth/register", json={"username": "a@example.com", "password": "password123"}).json()["token"]
+    token_b = client.post("/api/auth/register", json={"username": "b@example.com", "password": "password123"}).json()["token"]
+    response = client.post(
+        "/api/providers/credentials",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"provider": "openai", "api_key": "sk-user-a-secret", "validate": False},
+    )
+    assert response.status_code == 200
+    raw = (tmp_path / "credentials.json").read_text(encoding="utf-8")
+    assert "sk-user-a-secret" not in raw
+    assert backend_main._user_provider_keys("a@example.com")["openai"] == "sk-user-a-secret"
+    assert "openai" not in backend_main._user_provider_keys("b@example.com")
+    status_b = client.get(
+        "/api/providers/credentials/status",
+        headers={"Authorization": f"Bearer {token_b}"},
+    ).json()
+    assert status_b["credentials"]["openai"] is False
 
 
 def test_tts_config_update_switches_provider_for_next_generation():

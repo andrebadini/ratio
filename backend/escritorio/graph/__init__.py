@@ -1,1 +1,1 @@
-"""Grafos do Ratio Escritorio."""
+"""Grafos do DataJus Escritorio."""

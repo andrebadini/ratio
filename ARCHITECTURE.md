@@ -1,6 +1,6 @@
-﻿# Ratio - Pesquisa Jurisprudencial - Architecture
+﻿# DataJus - Pesquisa Jurisprudencial - Architecture
 
-This document describes the current production path of Ratio (web-first stack).
+This document describes the current production path of DataJus (web-first stack).
 
 ## 1. Runtime topology
 

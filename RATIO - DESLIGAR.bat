@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 
 cd /d "%~dp0"
-title Ratio - Pesquisa Jurisprudencial (Web Desligamento)
+title DataJus - Pesquisa Jurisprudencial (Web Desligamento)
 
 set "RUNTIME_DIR=%CD%\logs\runtime"
 set "BACKEND_PID_FILE=%RUNTIME_DIR%\backend.pid"
@@ -12,7 +12,7 @@ set "BACKEND_CMD_REGEX=uvicorn\s+backend\.main:app"
 set "FRONTEND_CMD_REGEX=http\.server\s+5500\s+--directory\s+frontend"
 
 echo ============================================================
-echo Ratio - Pesquisa Jurisprudencial (Web Desligamento)
+echo DataJus - Pesquisa Jurisprudencial (Web Desligamento)
 echo ============================================================
 echo.
 

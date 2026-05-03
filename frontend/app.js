@@ -1,4 +1,4 @@
-﻿const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id);
 
 const PIPELINE_STEPS = [
   { name: "Embeddings", desc: "Vetorizando a pergunta.", durationMs: 2200, badge: "EMBEDDINGS" },
@@ -22,6 +22,8 @@ const PIPELINE_STAGE_TO_STEP = {
 };
 const PENDING_REFRESH_MS = 220;
 const SESSION_STORAGE_KEY = "jurisai_session_v1";
+const AUTH_TOKEN_STORAGE_KEY = "ratio_auth_token_v1";
+const AUTH_USER_STORAGE_KEY = "ratio_auth_user_v1";
 const ONBOARDING_STORAGE_KEY = "jurisai_onboarding_seen_v1";
 const ONBOARDING_KEY_VALIDATE_TIMEOUT_MS = 18000;
 const ONBOARDING_KEY_STATUS_PULSE_MS = 1000;
@@ -58,6 +60,19 @@ const PERSONA_DEFAULT = "visao_geral";
 const PERSONA_PROMPT_MAX_CHARS = 6000;
 const PERSONA_MODEL_MAX_CHARS = 80;
 const THEME_STORAGE_KEY = "ratio_theme";
+const PROVIDER_KEY_META = {
+  gemini: { label: "GEMINI_API_KEY", endpoint: "/api/providers/credentials", defaultModel: "gemini-3-flash-preview" },
+  claude: { label: "ANTHROPIC_API_KEY", endpoint: "/api/providers/credentials", defaultModel: "claude-haiku-4-5-20251001" },
+  openai: { label: "OPENAI_API_KEY", endpoint: "/api/providers/credentials", defaultModel: "gpt-5-mini" },
+  deepseek: { label: "DEEPSEEK_API_KEY", endpoint: "/api/providers/credentials", defaultModel: "deepseek-v4-flash" },
+  minimax: { label: "MINIMAX_API_KEY", endpoint: "/api/providers/credentials", defaultModel: "MiniMax-M2.7-highspeed" }
+};
+const EMBEDDING_DEFAULTS = {
+  gemini: { model: "gemini-embedding-001", baseUrl: "" },
+  lm_studio: { model: "text-embedding-qwen3-embedding-0.6b", baseUrl: "http://127.0.0.1:1234/v1" },
+  openai_compatible: { model: "text-embedding-qwen3-embedding-0.6b", baseUrl: "http://127.0.0.1:1234/v1" },
+  openai: { model: "text-embedding-3-small", baseUrl: "https://api.openai.com/v1" }
+};
 
 const EXAMPLE_PROMPTS = [
   {
@@ -142,11 +157,16 @@ const LIBRARY_MODE_META = {
 };
 
 const state = {
-  apiBase: localStorage.getItem("jurisai_api_base") || "http://127.0.0.1:8000",
+  apiBase:
+    localStorage.getItem("jurisai_api_base") || (typeof window !== "undefined"
+      ? (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") && window.location.port === "5500"
+        ? window.location.origin.replace(":5500", ":8000")
+        : window.location.origin.replace(/\/$/, "")
+      : "http://127.0.0.1:8000"),
   turns: [],
   activeTurnId: null,
   answerFontScale: 1,
-  ttsProviderPreference: "legacy_google",
+  ttsProviderPreference: "minimax",
   onboardingSeen: localStorage.getItem(ONBOARDING_STORAGE_KEY) === "1",
   about: {
     open: false,
@@ -221,6 +241,27 @@ const state = {
   }
 };
 
+let appBootstrapped = false;
+let authEventsBound = false;
+let authToken = sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+let authUser = sessionStorage.getItem(AUTH_USER_STORAGE_KEY) || "";
+state.providerCatalog = {};
+state.auth = { token: authToken, user: authUser };
+
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const token = sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  const rawUrl = typeof input === "string" ? input : String(input?.url || "");
+  const shouldAttach = !!token && (
+    rawUrl.startsWith("/api/") ||
+    rawUrl.startsWith(state.apiBase.replace(/\/$/, "") + "/api/")
+  );
+  if (!shouldAttach) return nativeFetch(input, init);
+  const headers = new Headers(init?.headers || (typeof input !== "string" ? input.headers : undefined) || {});
+  if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  return nativeFetch(input, { ...init, headers });
+};
+
 const AUTO_UPDATE_DISMISSED_KEY = "jurisai_update_dismissed_v1";
 
 const audioPlayer = new Audio();
@@ -232,14 +273,21 @@ const closeOnboardingBtn = $("closeOnboardingBtn");
 const onboardingPrimaryBtn = $("onboardingPrimaryBtn");
 const openOnboardingGuideBtn = $("openOnboardingGuideBtn");
 const onboardingApiKeyInput = $("onboardingApiKeyInput");
+const onboardingProviderSelect = $("onboardingProviderSelect");
+const onboardingApiKeyLabel = $("onboardingApiKeyLabel");
 const onboardingPersistEnv = $("onboardingPersistEnv");
 const onboardingSaveKeyBtn = $("onboardingSaveKeyBtn");
 const onboardingKeyStatus = $("onboardingKeyStatus");
+const authModal = $("authModal");
+const authUsernameInput = $("authUsernameInput");
+const authPasswordInput = $("authPasswordInput");
+const authLoginBtn = $("authLoginBtn");
+const authRegisterBtn = $("authRegisterBtn");
+const authStatus = $("authStatus");
+const logoutBtn = $("logoutBtn");
 const supportModal = $("supportModal");
 const closeSupportBtn = $("closeSupportBtn");
 const dismissSupportBtn = $("dismissSupportBtn");
-const copySupportPixBtn = $("copySupportPixBtn");
-const supportPixKeyText = $("supportPixKeyText");
 const aboutModal = $("aboutModal");
 const closeAboutBtn = $("closeAboutBtn");
 const aboutTabs = $("aboutTabs");
@@ -247,8 +295,6 @@ const aboutTabButtons = Array.from(document.querySelectorAll(".about-tab[data-ab
 const aboutPanes = Array.from(document.querySelectorAll(".about-pane[data-about-pane]"));
 const openAboutBtns = Array.from(document.querySelectorAll("[data-open-about]"));
 const openAcervoBtns = Array.from(document.querySelectorAll("[data-open-acervo]"));
-const copyPixKeyBtn = $("copyPixKeyBtn");
-const pixKeyText = $("pixKeyText");
 const settingsPanel = $("settingsPanel");
 const acervoPanel = $("acervoPanel");
 const evidencePanel = $("evidencePanel");
@@ -264,6 +310,12 @@ const settingsClaudeKeyInput = $("settingsClaudeKeyInput");
 const settingsSaveClaudeKeyBtn = $("settingsSaveClaudeKeyBtn");
 const settingsClaudeKeyStatus = $("settingsClaudeKeyStatus");
 const settingsClaudePersistEnv = $("settingsClaudePersistEnv");
+const settingsProviderKeySelect = $("settingsProviderKeySelect");
+const settingsProviderKeyLabel = $("settingsProviderKeyLabel");
+const settingsProviderKeyInput = $("settingsProviderKeyInput");
+const settingsProviderPersistEnv = $("settingsProviderPersistEnv");
+const settingsSaveProviderKeyBtn = $("settingsSaveProviderKeyBtn");
+const settingsProviderKeyStatus = $("settingsProviderKeyStatus");
 const queryInput = $("queryInput");
 const askBtn = $("askBtn");
 const requestState = $("requestState");
@@ -330,7 +382,16 @@ const generationModelInput = $("generationModelInput");
 const generationFallbackModelInput = $("generationFallbackModelInput");
 const geminiModelsList = $("geminiModelsList");
 const ttsProviderSelect = $("ttsProviderSelect");
+const ttsModelSelect = $("ttsModelSelect");
+const ttsVoiceSelect = $("ttsVoiceSelect");
 const ttsProviderStatus = $("ttsProviderStatus");
+const embeddingProviderSelect = $("embeddingProviderSelect");
+const embeddingModelInput = $("embeddingModelInput");
+const embeddingBaseUrlInput = $("embeddingBaseUrlInput");
+const embeddingApiKeyInput = $("embeddingApiKeyInput");
+const embeddingPersistEnv = $("embeddingPersistEnv");
+const saveEmbeddingConfigBtn = $("saveEmbeddingConfigBtn");
+const embeddingConfigStatus = $("embeddingConfigStatus");
 const userCorpusNameInput = $("userCorpusNameInput");
 const userCorpusFilesInput = $("userCorpusFilesInput");
 const userCorpusFolderInput = $("userCorpusFolderInput");
@@ -579,7 +640,143 @@ function normalizeStoredTurn(raw) {
 
 function normalizeTtsProviderValue(raw) {
   const value = String(raw || "").trim().toLowerCase();
-  return value === "gemini_native" ? "gemini_native" : "legacy_google";
+  if (["gemini_native", "openai", "minimax", "kokoro_local"].includes(value)) return value;
+  return "legacy_google";
+}
+
+function normalizeGenerationProvider(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  return ["gemini", "claude", "openai", "deepseek", "minimax"].includes(value) ? value : "minimax";
+}
+
+function providerKeyMeta(rawProvider) {
+  const provider = normalizeGenerationProvider(rawProvider);
+  return PROVIDER_KEY_META[provider] || PROVIDER_KEY_META.gemini;
+}
+
+function setProviderKeyStatus(target, text, isError = false) {
+  if (!target) return;
+  target.textContent = text || "";
+  target.className = isError ? "rag-config-status error" : "rag-config-status";
+}
+
+function setAuthStatus(text, isError = false) {
+  if (!authStatus) return;
+  authStatus.textContent = text || "";
+  authStatus.className = isError ? "rag-config-status error" : "rag-config-status";
+}
+
+function setAuthOpen(open) {
+  document.body.dataset.authOpen = open ? "true" : "false";
+  if (authModal) authModal.hidden = !open;
+}
+
+function authPayload() {
+  return {
+    username: String(authUsernameInput?.value || "").trim(),
+    password: String(authPasswordInput?.value || "")
+  };
+}
+
+async function submitAuth(mode = "login") {
+  const payload = authPayload();
+  if (!payload.username || !payload.password) {
+    setAuthStatus("Informe usuario e senha.", true);
+    return;
+  }
+  const button = mode === "register" ? authRegisterBtn : authLoginBtn;
+  if (button) button.disabled = true;
+  setAuthStatus(mode === "register" ? "Criando senha..." : "Entrando...");
+  try {
+    const base = state.apiBase.replace(/\/$/, "");
+    const response = await nativeFetch(`${base}/api/auth/${mode === "register" ? "register" : "login"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.detail?.message || data?.detail || "Falha de autenticacao.");
+    }
+    authToken = String(data?.token || "");
+    authUser = String(data?.user?.username || payload.username || "");
+    sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, authToken);
+    sessionStorage.setItem(AUTH_USER_STORAGE_KEY, authUser);
+    state.auth = { token: authToken, user: authUser };
+    if (authPasswordInput) authPasswordInput.value = "";
+    setAuthOpen(false);
+    setAuthStatus("");
+    if (!appBootstrapped) init();
+    else {
+      await loadProviderCatalog();
+      await loadRagConfigMetadata();
+      await fetchGeminiStatus();
+    }
+  } catch (err) {
+    setAuthStatus(String(err?.message || err), true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function logout() {
+  try {
+    await fetch(`${state.apiBase.replace(/\/$/, "")}/api/auth/logout`, { method: "POST" });
+  } catch (_) {}
+  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_USER_STORAGE_KEY);
+  authToken = "";
+  authUser = "";
+  state.auth = { token: "", user: "" };
+  setAuthOpen(true);
+  setRequestState("Sessao encerrada.");
+}
+
+async function ensureAuthenticated() {
+  authToken = sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  authUser = sessionStorage.getItem(AUTH_USER_STORAGE_KEY) || "";
+  if (!authToken) {
+    setAuthOpen(true);
+    return false;
+  }
+  try {
+    const response = await fetch(`${state.apiBase.replace(/\/$/, "")}/api/auth/me`);
+    if (!response.ok) throw new Error(String(response.status));
+    const data = await response.json();
+    authUser = String(data?.user?.username || authUser || "");
+    sessionStorage.setItem(AUTH_USER_STORAGE_KEY, authUser);
+    state.auth = { token: authToken, user: authUser };
+    setAuthOpen(false);
+    return true;
+  } catch (_) {
+    sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    sessionStorage.removeItem(AUTH_USER_STORAGE_KEY);
+    setAuthOpen(true);
+    return false;
+  }
+}
+
+function syncProviderKeyLabels() {
+  const onboardingProvider = normalizeGenerationProvider(onboardingProviderSelect?.value || generationProvider?.value || "minimax");
+  const onboardingMeta = providerKeyMeta(onboardingProvider);
+  if (onboardingApiKeyLabel) onboardingApiKeyLabel.textContent = onboardingMeta.label;
+  if (onboardingApiKeyInput) onboardingApiKeyInput.placeholder = onboardingProvider === "minimax" ? "Cole sua MINIMAX_API_KEY" : `Cole sua ${onboardingMeta.label}`;
+
+  const settingsProvider = normalizeGenerationProvider(settingsProviderKeySelect?.value || "openai");
+  const settingsMeta = providerKeyMeta(settingsProvider);
+  if (settingsProviderKeyLabel) settingsProviderKeyLabel.textContent = settingsMeta.label;
+  if (settingsProviderKeyInput) settingsProviderKeyInput.placeholder = `Cole sua ${settingsMeta.label}`;
+}
+
+function modelMatchesProvider(provider, model) {
+  const value = String(model || "").trim().toLowerCase();
+  if (!value) return false;
+  if (provider === "gemini") return value.startsWith("gemini-");
+  if (provider === "claude") return value.startsWith("claude-");
+  if (provider === "openai") return value.startsWith("gpt-") || value.startsWith("o");
+  if (provider === "deepseek") return value.startsWith("deepseek-");
+  if (provider === "minimax") return value.startsWith("minimax-");
+  return false;
 }
 
 function deepClonePersonaConfigs(source) {
@@ -625,14 +822,19 @@ function personaDefaultPromptText(key) {
   const rawPrompt = normalizePersonaPrompt((state.personaPromptDefaults || {})[validKey]);
   if (rawPrompt) return rawPrompt;
   if (validKey === PERSONA_DEFAULT) {
-    return "Esta persona usa apenas o prompt-base geral do Ratio, sem instruções extras específicas.";
+    return "Esta persona usa apenas o prompt-base geral do DataJus, sem instruções extras específicas.";
   }
   return "Esta persona não possui instruções adicionais carregadas no momento.";
 }
 
+function scopedStorageKey(key) {
+  const user = String(authUser || "").trim().toLowerCase();
+  return user ? `ratio:${user}:${key}` : key;
+}
+
 function loadStoredPersonaConfigs() {
   try {
-    const raw = localStorage.getItem(PERSONA_CONFIG_STORAGE_KEY);
+    const raw = localStorage.getItem(scopedStorageKey(PERSONA_CONFIG_STORAGE_KEY));
     if (!raw) return deepClonePersonaConfigs(PERSONA_CONFIG_DEFAULTS);
     return normalizePersonaConfigs(JSON.parse(raw));
   } catch (_) {
@@ -643,7 +845,7 @@ function loadStoredPersonaConfigs() {
 function persistPersonaConfigs() {
   try {
     const payload = normalizePersonaConfigs(state.personaConfigs);
-    localStorage.setItem(PERSONA_CONFIG_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(scopedStorageKey(PERSONA_CONFIG_STORAGE_KEY), JSON.stringify(payload));
   } catch (_) {
     // Ignore storage failures (private mode / quota / policies).
   }
@@ -655,8 +857,8 @@ function loadStoredSession() {
     activeTurnId: null,
     answerFontScale: 1,
     rerankerBackend: "local",
-    generationProvider: "gemini",
-    ttsProviderPreference: "legacy_google",
+    generationProvider: "minimax",
+    ttsProviderPreference: "minimax",
     preferRecent: true,
     preferUserSources: true,
     sourceSelection: [],
@@ -667,7 +869,7 @@ function loadStoredSession() {
     selectedPersona: PERSONA_DEFAULT
   };
   try {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    const raw = localStorage.getItem(scopedStorageKey(SESSION_STORAGE_KEY));
     if (!raw) return fallback;
     const parsed = JSON.parse(raw);
     const turns = Array.isArray(parsed?.turns)
@@ -688,7 +890,7 @@ function loadStoredSession() {
         ? Math.max(ANSWER_FONT_SCALE_MIN, Math.min(ANSWER_FONT_SCALE_MAX, Number(parsed.answerFontScale)))
         : 1,
       rerankerBackend: parsed?.rerankerBackend === "gemini" ? "gemini" : "local",
-      generationProvider: parsed?.generationProvider === "claude" ? "claude" : "gemini",
+      generationProvider: normalizeGenerationProvider(parsed?.generationProvider || "minimax"),
       ttsProviderPreference: normalizeTtsProviderValue(parsed?.ttsProviderPreference),
       preferRecent: typeof parsed?.preferRecent === "boolean" ? parsed.preferRecent : true,
       preferUserSources: typeof parsed?.preferUserSources === "boolean" ? parsed.preferUserSources : true,
@@ -725,7 +927,7 @@ function persistSession() {
       activeTurnId: state.activeTurnId || null,
       answerFontScale: state.answerFontScale,
       rerankerBackend: rerankerBackend?.value === "gemini" ? "gemini" : "local",
-      generationProvider: generationProvider?.value === "claude" ? "claude" : "gemini",
+      generationProvider: normalizeGenerationProvider(generationProvider?.value),
       ttsProviderPreference: normalizeTtsProviderValue(state.ttsProviderPreference),
       preferRecent: !!preferRecent?.checked,
       preferUserSources: userSourcePriorityToggle?.checked !== false,
@@ -737,15 +939,15 @@ function persistSession() {
       selectedPersona: state.selectedPersona || PERSONA_DEFAULT,
       savedAt: Date.now()
     };
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(scopedStorageKey(SESSION_STORAGE_KEY), JSON.stringify(payload));
   } catch (_) {
     // Ignore storage failures (private mode / quota / policies).
   }
 }
 
 function syncProviderFields() {
-  const provider = generationProvider?.value || "gemini";
-  if (geminiModelFields) geminiModelFields.style.display = provider === "gemini" ? "" : "none";
+  const provider = normalizeGenerationProvider(generationProvider?.value || "minimax");
+  if (geminiModelFields) geminiModelFields.style.display = provider !== "claude" ? "" : "none";
   if (claudeModelFields) claudeModelFields.style.display = provider === "claude" ? "" : "none";
   state.generationProvider = provider;
 }
@@ -786,6 +988,94 @@ async function saveClaudeKeyFromSettings() {
   } catch (err) {
     statusEl.textContent = `Erro de conexao: ${err.message || err}`;
     statusEl.classList.add("error");
+  }
+}
+
+async function saveProviderKeyFromSettings() {
+  const provider = normalizeGenerationProvider(settingsProviderKeySelect?.value || "openai");
+  const key = String(settingsProviderKeyInput?.value || "").trim();
+  if (!key) {
+    setProviderKeyStatus(settingsProviderKeyStatus, `Insira uma chave ${providerKeyMeta(provider).label} valida.`, true);
+    return;
+  }
+  setProviderKeyStatus(settingsProviderKeyStatus, `Validando ${providerKeyMeta(provider).label}...`);
+  try {
+    const result = await saveProviderKey({
+      provider,
+      key,
+      persistEnv: settingsProviderPersistEnv?.checked !== false,
+      validate: true,
+    });
+    if (settingsProviderKeyInput) settingsProviderKeyInput.value = "";
+    setProviderKeyStatus(
+      settingsProviderKeyStatus,
+      result?.validated ? `Chave ${providerKeyMeta(provider).label} validada (${result.test_model || "ok"}).` : `Chave ${providerKeyMeta(provider).label} salva.`,
+      false
+    );
+  } catch (err) {
+    setProviderKeyStatus(settingsProviderKeyStatus, `Erro: ${err.message || err}`, true);
+  }
+}
+
+function syncEmbeddingDefaultsForProvider({ overwrite = false } = {}) {
+  const provider = String(embeddingProviderSelect?.value || "gemini").trim();
+  const providerMeta = catalogProviders("embedding").find((item) => item.id === provider);
+  const catalogModels = Array.isArray(providerMeta?.models) ? providerMeta.models : [];
+  const defaults = {
+    model: String(catalogModels.find((item) => item.default)?.id || catalogModels[0]?.id || (EMBEDDING_DEFAULTS[provider] || EMBEDDING_DEFAULTS.gemini).model),
+    baseUrl: String(providerMeta?.base_url ?? (EMBEDDING_DEFAULTS[provider] || EMBEDDING_DEFAULTS.gemini).baseUrl)
+  };
+  fillSelect(embeddingModelInput, catalogModels.length ? catalogModels : [{ id: defaults.model, label: defaults.model }]);
+  if (embeddingBaseUrlInput && providerMeta) {
+    const baseUrl = defaults.baseUrl;
+    embeddingBaseUrlInput.innerHTML = [
+      `<option value="">Padrão do provedor</option>`,
+      baseUrl ? `<option value="${escapeAttr(baseUrl)}">${escapeHtml(baseUrl)}</option>` : "",
+    ].join("");
+  }
+  if (embeddingModelInput && (overwrite || !embeddingModelInput.value.trim())) {
+    embeddingModelInput.value = defaults.model;
+  }
+  if (embeddingBaseUrlInput && (overwrite || !embeddingBaseUrlInput.value.trim())) {
+    embeddingBaseUrlInput.value = defaults.baseUrl;
+  }
+}
+
+async function loadEmbeddingConfig() {
+  if (!embeddingProviderSelect) return;
+  try {
+    const response = await fetch(`${state.apiBase.replace(/\/$/, "")}/api/embedding/config`);
+    if (!response.ok) throw new Error(String(response.status));
+    const payload = await response.json();
+    embeddingProviderSelect.value = String(payload?.provider || "gemini");
+    if (embeddingModelInput) embeddingModelInput.value = String(payload?.model || "");
+    if (embeddingBaseUrlInput) embeddingBaseUrlInput.value = String(payload?.base_url || "");
+    setProviderKeyStatus(embeddingConfigStatus, `Embedding ativo: ${embeddingProviderSelect.value} / ${embeddingModelInput?.value || "-"}.`);
+  } catch (err) {
+    syncEmbeddingDefaultsForProvider({ overwrite: false });
+    setProviderKeyStatus(embeddingConfigStatus, `Nao foi possivel carregar embeddings: ${err.message || err}`, true);
+  }
+}
+
+async function saveEmbeddingConfig() {
+  const provider = String(embeddingProviderSelect?.value || "gemini").trim();
+  const model = String(embeddingModelInput?.value || "").trim();
+  if (!model) {
+    setProviderKeyStatus(embeddingConfigStatus, "Informe o modelo de embedding.", true);
+    return;
+  }
+  try {
+    const result = await postJson("/api/embedding/config", {
+      provider,
+      model,
+      base_url: String(embeddingBaseUrlInput?.value || "").trim() || null,
+      api_key: String(embeddingApiKeyInput?.value || "").trim() || null,
+      persist_env: embeddingPersistEnv?.checked !== false
+    });
+    if (embeddingApiKeyInput) embeddingApiKeyInput.value = "";
+    setProviderKeyStatus(embeddingConfigStatus, `Embedding salvo: ${result.provider} / ${result.model}.`);
+  } catch (err) {
+    setProviderKeyStatus(embeddingConfigStatus, `Falha ao salvar embedding: ${err.message || err}`, true);
   }
 }
 
@@ -928,8 +1218,10 @@ function setRequestState(text, isError = false) {
 
 function updateComposerHealthStatus(data) {
   if (composerApiStatus) {
-    const apiActive = !!data?.has_gemini_api_key;
-    composerApiStatus.textContent = apiActive ? "API Gemini ativa" : "API Gemini inativa";
+    const provider = normalizeGenerationProvider(data?.generation_provider || generationProvider?.value || state.generationProvider || "minimax");
+    const apiActive = data?.has_generation_api_key ?? data?.has_gemini_api_key;
+    const label = provider === "claude" ? "Claude" : provider === "openai" ? "OpenAI" : provider === "deepseek" ? "DeepSeek" : provider === "minimax" ? "MiniMax" : "Gemini";
+    composerApiStatus.textContent = apiActive ? `API ${label} ativa` : `API ${label} inativa`;
     composerApiStatus.dataset.status = apiActive ? "active" : "inactive";
   }
   if (appVersionLabel) {
@@ -1090,7 +1382,7 @@ function dismissSupport() {
   // If onboarding still needed, show it after support is dismissed
   if (!state.onboardingSeen) {
     setOnboardingOpen(true);
-    setRequestState("Guia inicial aberto. Configure GEMINI_API_KEY para comecar.");
+    setRequestState("Guia inicial aberto. Configure a chave do provedor para comecar.");
   }
 }
 
@@ -1341,6 +1633,79 @@ function renderTtsProviderOptions(options) {
     .join("");
 }
 
+function catalogProviders(section) {
+  return Array.isArray(state.providerCatalog?.[section]?.providers)
+    ? state.providerCatalog[section].providers
+    : [];
+}
+
+function modelsForProvider(section, provider) {
+  const item = catalogProviders(section).find((entry) => String(entry?.id || "") === String(provider || ""));
+  return Array.isArray(item?.models) ? item.models : [];
+}
+
+function fillSelect(select, options, { includeBlank = false, blankLabel = "" } = {}) {
+  if (!select || !Array.isArray(options)) return;
+  const current = String(select.value || "");
+  const rows = [];
+  if (includeBlank) rows.push(`<option value="">${escapeHtml(blankLabel)}</option>`);
+  for (const item of options) {
+    const id = String(item?.id || "").trim();
+    if (!id) continue;
+    const disabled = item?.disabled ? " disabled" : "";
+    const label = String(item?.label || id);
+    rows.push(`<option value="${escapeAttr(id)}"${disabled}>${escapeHtml(label)}</option>`);
+  }
+  select.innerHTML = rows.join("");
+  if (current && Array.from(select.options).some((option) => option.value === current && !option.disabled)) {
+    select.value = current;
+  }
+}
+
+function populateProviderCatalogControls() {
+  const generationProviders = catalogProviders("generation");
+  fillSelect(generationProvider, generationProviders);
+  fillSelect(onboardingProviderSelect, generationProviders);
+  fillSelect(settingsProviderKeySelect, generationProviders);
+  syncProviderModelOptions();
+
+  const embeddingProviders = catalogProviders("embedding");
+  fillSelect(embeddingProviderSelect, embeddingProviders);
+  syncEmbeddingDefaultsForProvider({ overwrite: true });
+
+  const ttsProviders = catalogProviders("tts");
+  fillSelect(ttsProviderSelect, ttsProviders);
+  syncTtsModelOptions();
+}
+
+function syncProviderModelOptions() {
+  const provider = normalizeGenerationProvider(generationProvider?.value || "minimax");
+  const models = modelsForProvider("generation", provider);
+  fillSelect(generationModelInput, models);
+  fillSelect(generationFallbackModelInput, models);
+  fillSelect(geminiRerankModelInput, modelsForProvider("generation", "gemini"));
+  fillSelect(personaModelInput, models, { includeBlank: true, blankLabel: "Usar modelo global" });
+}
+
+function syncTtsModelOptions() {
+  const provider = normalizeTtsProviderValue(ttsProviderSelect?.value || "minimax");
+  const providerMeta = catalogProviders("tts").find((item) => item.id === provider);
+  fillSelect(ttsModelSelect, Array.isArray(providerMeta?.models) ? providerMeta.models : []);
+  fillSelect(ttsVoiceSelect, Array.isArray(providerMeta?.voices) ? providerMeta.voices : []);
+}
+
+async function loadProviderCatalog() {
+  try {
+    const response = await fetch(`${state.apiBase.replace(/\/$/, "")}/api/providers/catalog`);
+    if (!response.ok) throw new Error(String(response.status));
+    const payload = await response.json();
+    state.providerCatalog = payload?.catalog || {};
+    populateProviderCatalogControls();
+  } catch (err) {
+    setRequestState(`Nao foi possivel carregar presets de provedores: ${err.message || err}`, true);
+  }
+}
+
 async function applyTtsProviderSelection(provider, { announce = false, persistEnv = false } = {}) {
   if (!ttsProviderSelect) return false;
   const normalized = normalizeTtsProviderValue(provider);
@@ -1349,6 +1714,8 @@ async function applyTtsProviderSelection(provider, { announce = false, persistEn
   try {
     const result = await postJson("/api/tts/config", {
       provider: normalized,
+      model: String(ttsModelSelect?.value || "").trim() || null,
+      voice: String(ttsVoiceSelect?.value || "").trim() || null,
       persist_env: !!persistEnv
     });
     renderTtsProviderOptions(result?.options);
@@ -1356,6 +1723,8 @@ async function applyTtsProviderSelection(provider, { announce = false, persistEn
     const label = safeText(result?.provider_label, appliedProvider);
     state.ttsProviderPreference = appliedProvider;
     ttsProviderSelect.value = appliedProvider;
+    if (ttsModelSelect && result?.model) ttsModelSelect.value = String(result.model);
+    if (ttsVoiceSelect && result?.voice) ttsVoiceSelect.value = String(result.voice);
     persistSession();
     setTtsProviderStatus(`Motor ativo: ${label}.`);
     if (announce) {
@@ -1385,13 +1754,11 @@ async function loadTtsProviderConfig() {
     const payload = await response.json();
     renderTtsProviderOptions(payload?.options);
     const serverProvider = normalizeTtsProviderValue(payload?.provider);
-    const preferredProvider = normalizeTtsProviderValue(state.ttsProviderPreference || serverProvider);
-    if (preferredProvider !== serverProvider) {
-      await applyTtsProviderSelection(preferredProvider, { announce: false, persistEnv: false });
-      return;
-    }
     state.ttsProviderPreference = serverProvider;
     ttsProviderSelect.value = serverProvider;
+    syncTtsModelOptions();
+    if (ttsModelSelect && payload?.model) ttsModelSelect.value = String(payload.model);
+    if (ttsVoiceSelect && payload?.voice) ttsVoiceSelect.value = String(payload.voice);
     persistSession();
     setTtsProviderStatus(`Motor ativo: ${safeText(payload?.provider_label, serverProvider)}.`);
   } catch (err) {
@@ -1750,12 +2117,14 @@ function setOnboardingKeyStatus(text, level = "info") {
 
 function startOnboardingKeyValidationFeedback() {
   const startedAt = Date.now();
+  const provider = normalizeGenerationProvider(onboardingProviderSelect?.value || generationProvider?.value || "minimax");
+  const keyLabel = providerKeyMeta(provider).label;
 
   const renderStatus = () => {
     const elapsedSec = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
     if (elapsedSec >= ONBOARDING_KEY_VERY_LONG_WAIT_SECONDS) {
       setOnboardingKeyStatus(
-        `Ainda validando a chave Gemini... ${elapsedSec}s. Sem resposta da API ate agora; verifique conectividade com Google AI.`,
+        `Ainda validando ${keyLabel}... ${elapsedSec}s. Sem resposta da API ate agora; verifique conectividade com o provedor.`,
         "info"
       );
       return;
@@ -1767,7 +2136,7 @@ function startOnboardingKeyValidationFeedback() {
       );
       return;
     }
-    setOnboardingKeyStatus(`Validando chave Gemini... ${elapsedSec}s`, "info");
+    setOnboardingKeyStatus(`Validando ${keyLabel}... ${elapsedSec}s`, "info");
   };
 
   renderStatus();
@@ -2035,6 +2404,14 @@ async function loadRagConfigMetadata() {
       nextValues[key] = normalizeRagConfigValue(item, raw, defaults[key]);
     }
     state.ragConfigValues = nextValues;
+    const providerFromBackend = normalizeGenerationProvider(nextValues.generation_provider || defaults.generation_provider || state.generationProvider || "minimax");
+    if (generationProvider) {
+      generationProvider.value = providerFromBackend;
+      state.generationProvider = providerFromBackend;
+      if (onboardingProviderSelect) onboardingProviderSelect.value = providerFromBackend;
+      syncProviderFields();
+      syncProviderKeyLabels();
+    }
     renderRagConfigControls();
     syncGenerationModelInputsFromState();
     syncGeminiRerankModelInputFromState();
@@ -2068,7 +2445,7 @@ function apiPayload(query) {
   const personaPrompt = normalizePersonaPrompt(personaCfg.prompt);
   const personaModel = normalizePersonaModel(personaCfg.model);
   const ragConfigPayload = { ...(state.ragConfigValues || {}) };
-  const provider = generationProvider?.value || "gemini";
+  const provider = normalizeGenerationProvider(generationProvider?.value || "minimax");
   ragConfigPayload.generation_provider = provider;
   if (provider === "claude" && claudeModelInput) {
     ragConfigPayload.generation_model = claudeModelInput.value || "claude-sonnet-4-20250514";
@@ -2441,71 +2818,80 @@ async function postNdjsonStream(path, payload, options = {}) {
 async function fetchGeminiStatus() {
   const base = state.apiBase.replace(/\/$/, "");
   try {
-    const response = await fetch(`${base}/api/gemini/status`);
+    const response = await fetch(`${base}/api/providers/status`);
     if (!response.ok) throw new Error(String(response.status));
     const payload = await response.json();
-    refreshGeminiModelOptions(payload?.supported_models);
-    if (payload?.has_api_key) {
-      setOnboardingKeyStatus("Chave Gemini ativa. Plataforma pronta para consulta.", "success");
+    const allModels = Object.values(payload?.providers || {}).flatMap((item) => Array.isArray(item?.models) ? item.models : []);
+    refreshGeminiModelOptions(allModels);
+    const provider = normalizeGenerationProvider(generationProvider?.value || state.generationProvider || "minimax");
+    if (payload?.providers?.[provider]?.has_api_key) {
+      setOnboardingKeyStatus(`Chave ${providerKeyMeta(provider).label} ativa. Plataforma pronta para consulta.`, "success");
       return true;
     }
-    setOnboardingKeyStatus("Chave Gemini ausente. Informe e valide para liberar consultas.", "error");
+    setOnboardingKeyStatus(`Chave ${providerKeyMeta(provider).label} ausente. Informe e valide para liberar consultas.`, "error");
     return false;
   } catch (_) {
     setOnboardingKeyStatus(
-      "Nao foi possivel validar a chave agora. Verifique o Guia de API key: https://ai.google.dev/gemini-api/docs/api-key",
+      "Nao foi possivel validar as chaves agora. Verifique se o backend esta ativo.",
       "error"
     );
     return false;
   }
 }
 
-async function saveGeminiKeyFromOnboarding() {
+async function saveProviderKey({ provider, key, persistEnv, validate = true } = {}) {
+  const normalizedProvider = normalizeGenerationProvider(provider);
+  const meta = providerKeyMeta(normalizedProvider);
+  const selectedModel = String(state.ragConfigValues?.generation_model || generationModelInput?.value || "").trim();
+  const testModel = modelMatchesProvider(normalizedProvider, selectedModel) ? selectedModel : meta.defaultModel;
+  const body = {
+    provider: normalizedProvider,
+    api_key: String(key || "").trim(),
+    validate: !!validate,
+    test_model: testModel
+  };
+  return postJson("/api/providers/credentials", body, {
+    timeoutMs: ONBOARDING_KEY_VALIDATE_TIMEOUT_MS,
+    timeoutLabel: "A validacao da chave"
+  });
+}
+
+async function saveProviderKeyFromOnboarding() {
+  const provider = normalizeGenerationProvider(onboardingProviderSelect?.value || generationProvider?.value || "minimax");
   const key = String(onboardingApiKeyInput?.value || "").trim();
   if (!key) {
-    setOnboardingKeyStatus("Cole uma chave Gemini valida para continuar.", "error");
+    setOnboardingKeyStatus(`Cole uma chave ${providerKeyMeta(provider).label} valida para continuar.`, "error");
     return;
   }
-
-  const defaultGenerationModel = String(
-    state.ragConfigDefaults?.generation_model || "gemini-3-flash-preview"
-  ).trim();
-  const testModel = String(
-    state.ragConfigValues?.generation_model
-    || generationModelInput?.value
-    || defaultGenerationModel
-  ).trim();
 
   onboardingSaveKeyBtn.disabled = true;
   let stopFeedback = startOnboardingKeyValidationFeedback();
   try {
-    const result = await postJson("/api/gemini/config", {
-      api_key: key,
-      persist_env: onboardingPersistEnv?.checked !== false,
+    const result = await saveProviderKey({
+      provider,
+      key,
+      persistEnv: onboardingPersistEnv?.checked !== false,
       validate: true,
-      test_model: testModel || defaultGenerationModel,
-      validation_timeout_ms: ONBOARDING_KEY_VALIDATE_TIMEOUT_MS
-    }, {
-      timeoutMs: ONBOARDING_KEY_VALIDATE_TIMEOUT_MS,
-      timeoutLabel: "A validacao da chave"
     });
     stopFeedback?.();
     stopFeedback = null;
     if (onboardingApiKeyInput) onboardingApiKeyInput.value = "";
+    if (generationProvider) generationProvider.value = provider;
+    state.generationProvider = provider;
+    syncProviderFields();
     state.onboardingSeen = true;
     localStorage.setItem(ONBOARDING_STORAGE_KEY, "1");
-    const persisted = result?.persisted_env ? " e salva em .env" : "";
     const validated = result?.validated !== false;
     const validationWarning = String(result?.validation_warning || "").trim();
     if (validated) {
-      setOnboardingKeyStatus(`Chave validada${persisted}.`, "success");
-      setRequestState("Chave Gemini validada. Sistema pronto para consultar.");
+      setOnboardingKeyStatus("Chave validada e salva no seu usuario.", "success");
+      setRequestState(`Chave ${providerKeyMeta(provider).label} validada. Sistema pronto para consultar.`);
     } else {
       const warningSuffix = validationWarning
         ? ` Validacao pendente: ${validationWarning}`
         : " Validacao pendente: sem resposta no tempo esperado.";
-      setOnboardingKeyStatus(`Chave salva${persisted}.${warningSuffix}`, "success");
-      setRequestState("Chave Gemini salva. Se necessario, repita a validacao depois.", false);
+      setOnboardingKeyStatus(`Chave salva no seu usuario.${warningSuffix}`, "success");
+      setRequestState(`Chave ${providerKeyMeta(provider).label} salva. Se necessario, repita a validacao depois.`, false);
     }
     await checkHealth();
     setOnboardingOpen(false, { markSeen: true });
@@ -2520,15 +2906,11 @@ async function saveGeminiKeyFromOnboarding() {
       );
       let fallbackSaveResult = null;
       try {
-        fallbackSaveResult = await postJson("/api/gemini/config", {
-          api_key: key,
-          persist_env: onboardingPersistEnv?.checked !== false,
+        fallbackSaveResult = await saveProviderKey({
+          provider,
+          key,
+          persistEnv: onboardingPersistEnv?.checked !== false,
           validate: false,
-          test_model: testModel || defaultGenerationModel,
-          validation_timeout_ms: ONBOARDING_KEY_VALIDATE_TIMEOUT_MS
-        }, {
-          timeoutMs: Math.min(10000, ONBOARDING_KEY_VALIDATE_TIMEOUT_MS),
-          timeoutLabel: "O salvamento da chave"
         });
       } catch (fallbackErr) {
         const fallbackDetail = String(fallbackErr?.message || "Falha desconhecida.");
@@ -2536,19 +2918,21 @@ async function saveGeminiKeyFromOnboarding() {
           `Falha ao salvar chave apos timeout de validacao: ${fallbackDetail}`,
           "error"
         );
-        setRequestState(`Falha ao salvar chave Gemini apos timeout: ${fallbackDetail}`, true);
+        setRequestState(`Falha ao salvar chave ${providerKeyMeta(provider).label} apos timeout: ${fallbackDetail}`, true);
         return;
       }
 
       if (onboardingApiKeyInput) onboardingApiKeyInput.value = "";
+      if (generationProvider) generationProvider.value = provider;
+      state.generationProvider = provider;
+      syncProviderFields();
       state.onboardingSeen = true;
       localStorage.setItem(ONBOARDING_STORAGE_KEY, "1");
-      const persisted = fallbackSaveResult?.persisted_env ? " e salva em .env" : "";
       setOnboardingKeyStatus(
-        `Chave salva sem validacao online${persisted}. Voce ja pode consultar; valide novamente depois.`,
+        "Chave salva no seu usuario sem validacao online. Voce ja pode consultar; valide novamente depois.",
         "success"
       );
-      setRequestState("Chave Gemini salva sem validacao online. Sistema liberado para consulta.", false);
+      setRequestState(`Chave ${providerKeyMeta(provider).label} salva sem validacao online. Sistema liberado para consulta.`, false);
       await checkHealth();
       setOnboardingOpen(false, { markSeen: true });
       return;
@@ -2556,7 +2940,7 @@ async function saveGeminiKeyFromOnboarding() {
 
     const detail = String(err?.message || "Falha desconhecida.");
     setOnboardingKeyStatus(`Falha ao validar chave: ${detail}`, "error");
-    setRequestState(`Falha ao validar chave Gemini: ${detail}`, true);
+    setRequestState(`Falha ao validar chave ${providerKeyMeta(provider).label}: ${detail}`, true);
   } finally {
     stopFeedback?.();
     onboardingSaveKeyBtn.disabled = false;
@@ -2589,7 +2973,7 @@ async function indexUserCorpusNow() {
   const ocrMissingOnly = userCorpusOcrMissingOnly?.checked !== false;
   const confirmText = [
     `Indexar ${files.length} arquivo(s) em "${sourceName}"?`,
-    "A indexacao vai consumir cota da API Gemini (embeddings e, para PDFs, OCR/limpeza).",
+    "A indexacao pode consumir cota do provedor de embeddings configurado e, para PDFs, OCR/limpeza.",
     "Esta acao exige confirmacao manual."
   ].join("\n");
   if (!window.confirm(confirmText)) {
@@ -3439,7 +3823,7 @@ function renderUpdateView() {
             <i data-lucide="rotate-cw"></i>
             <h3 class="informativo-title">Reiniciando...</h3>
           </div>
-          <p class="informativo-subtitle">O Ratio esta reiniciando. Esta pagina sera atualizada automaticamente.</p>
+          <p class="informativo-subtitle">O DataJus esta reiniciando. Esta pagina sera atualizada automaticamente.</p>
         </div>
       </section>`;
   } else if (u.done) {
@@ -3450,7 +3834,7 @@ function renderUpdateView() {
             <i data-lucide="check-circle"></i>
             <h3 class="informativo-title">Atualizado com sucesso</h3>
           </div>
-          <p class="informativo-subtitle">O Ratio foi atualizado para a versao <strong>${escapeHtml(u.remoteVersion)}</strong>.</p>
+          <p class="informativo-subtitle">O DataJus foi atualizado para a versao <strong>${escapeHtml(u.remoteVersion)}</strong>.</p>
         </div>
         <div class="update-actions-row">
           <button class="informativo-search-btn" type="button" id="restartNowBtn">
@@ -3503,7 +3887,7 @@ function renderUpdateView() {
             <i data-lucide="download"></i>
             <h3 class="informativo-title">Atualizacao disponivel</h3>
           </div>
-          <p class="informativo-subtitle">Uma nova versao do Ratio esta disponivel.</p>
+          <p class="informativo-subtitle">Uma nova versao do DataJus esta disponivel.</p>
         </div>
         <div class="update-version-row">
           <span class="update-version-tag">${escapeHtml(u.localVersion)}</span>
@@ -3528,7 +3912,7 @@ function renderUpdateView() {
             <i data-lucide="check-circle"></i>
             <h3 class="informativo-title">Você está na versão mais recente</h3>
           </div>
-          <p class="informativo-subtitle">Ratio v${escapeHtml(u.localVersion || "desconhecida")}${u.localBuild ? ` (build ${u.localBuild})` : ""}</p>
+          <p class="informativo-subtitle">DataJus v${escapeHtml(u.localVersion || "desconhecida")}${u.localBuild ? ` (build ${u.localBuild})` : ""}</p>
         </div>
         <div class="update-actions-row">
           <button class="meta-btn" type="button" id="closeUpdateViewBtn">Voltar</button>
@@ -4737,7 +5121,7 @@ async function ensureExplanation(turn) {
     query: turn.query,
     answer: turn.answer,
     docs: docsForExplain(turn),
-    generation_provider: generationProvider?.value || "gemini"
+    generation_provider: normalizeGenerationProvider(generationProvider?.value || "minimax")
   });
   turn.explanation = String(result?.explanation || "").trim();
   persistSession();
@@ -4992,13 +5376,6 @@ async function checkHealth() {
       }
       localStorage.setItem("ratio_install_id", data.install_id);
     }
-    // Force onboarding if backend reports no API key configured
-    if (data?.has_gemini_api_key === false && state.onboardingSeen) {
-      state.onboardingSeen = false;
-      localStorage.removeItem(ONBOARDING_STORAGE_KEY);
-      setOnboardingOpen(true);
-      setRequestState("Guia inicial aberto. Configure GEMINI_API_KEY para comecar.");
-    }
   };
   try {
     const response = await fetch(`${base}/health`);
@@ -5145,23 +5522,6 @@ function bindEvents() {
   openOnboardingGuideBtn?.addEventListener("click", () => setOnboardingOpen(true));
   closeSupportBtn?.addEventListener("click", dismissSupport);
   dismissSupportBtn?.addEventListener("click", dismissSupport);
-  copySupportPixBtn?.addEventListener("click", async () => {
-    const key = String(supportPixKeyText?.textContent || "").trim();
-    if (!key) return;
-    try {
-      await navigator.clipboard.writeText(key);
-      copySupportPixBtn.classList.add("copied");
-      copySupportPixBtn.innerHTML = '<i data-lucide="check"></i> Copiado!';
-      refreshIcons();
-      setTimeout(() => {
-        copySupportPixBtn.classList.remove("copied");
-        copySupportPixBtn.innerHTML = '<i data-lucide="copy"></i> Copiar chave PIX';
-        refreshIcons();
-      }, 2400);
-    } catch (_) {
-      setRequestState("Nao foi possivel copiar automaticamente.", true);
-    }
-  });
 
   closeAboutBtn?.addEventListener("click", () => setAboutOpen(false));
   for (const button of openAboutBtns) {
@@ -5257,20 +5617,6 @@ function bindEvents() {
     if (!target) return;
     const tab = target.getAttribute("data-about-tab-target") || "acervo";
     setAboutActiveTab(tab);
-  });
-
-  copyPixKeyBtn?.addEventListener("click", async () => {
-    const key = String(pixKeyText?.textContent || "").trim();
-    if (!key) {
-      setRequestState("Chave PIX indisponivel no momento.", true);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(key);
-      setRequestState("Chave PIX copiada.");
-    } catch (_) {
-      setRequestState("Nao foi possivel copiar automaticamente. Copie manualmente o texto.", true);
-    }
   });
 
   // ── Batch copy modal ──
@@ -5397,10 +5743,23 @@ function bindEvents() {
 
   generationProvider?.addEventListener("change", () => {
     syncProviderFields();
+    syncProviderModelOptions();
+    if (onboardingProviderSelect) onboardingProviderSelect.value = normalizeGenerationProvider(generationProvider.value);
+    syncProviderKeyLabels();
     persistSession();
   });
 
   settingsSaveClaudeKeyBtn?.addEventListener("click", saveClaudeKeyFromSettings);
+  settingsProviderKeySelect?.addEventListener("change", syncProviderKeyLabels);
+  settingsSaveProviderKeyBtn?.addEventListener("click", saveProviderKeyFromSettings);
+  onboardingProviderSelect?.addEventListener("change", () => {
+    const provider = normalizeGenerationProvider(onboardingProviderSelect.value);
+    if (generationProvider) generationProvider.value = provider;
+    syncProviderFields();
+    syncProviderKeyLabels();
+  });
+  embeddingProviderSelect?.addEventListener("change", () => syncEmbeddingDefaultsForProvider({ overwrite: true }));
+  saveEmbeddingConfigBtn?.addEventListener("click", saveEmbeddingConfig);
 
   geminiRerankModelInput?.addEventListener("change", () => {
     syncGeminiRerankModelStateFromInput();
@@ -5461,10 +5820,19 @@ function bindEvents() {
 
   ttsProviderSelect?.addEventListener("change", () => {
     const provider = normalizeTtsProviderValue(ttsProviderSelect.value);
+    syncTtsModelOptions();
+    applyTtsProviderSelection(provider, { announce: true, persistEnv: false });
+  });
+  ttsModelSelect?.addEventListener("change", () => {
+    const provider = normalizeTtsProviderValue(ttsProviderSelect?.value);
+    applyTtsProviderSelection(provider, { announce: true, persistEnv: false });
+  });
+  ttsVoiceSelect?.addEventListener("change", () => {
+    const provider = normalizeTtsProviderValue(ttsProviderSelect?.value);
     applyTtsProviderSelection(provider, { announce: true, persistEnv: false });
   });
 
-  onboardingSaveKeyBtn?.addEventListener("click", saveGeminiKeyFromOnboarding);
+  onboardingSaveKeyBtn?.addEventListener("click", saveProviderKeyFromOnboarding);
 
   ragAdvancedGroups?.addEventListener("input", (event) => {
     const target = event.target instanceof Element ? event.target : null;
@@ -5640,7 +6008,28 @@ function bindEvents() {
   });
 }
 
-function init() {
+function bindAuthEvents() {
+  if (authEventsBound) return;
+  authEventsBound = true;
+  authLoginBtn?.addEventListener("click", () => submitAuth("login"));
+  authRegisterBtn?.addEventListener("click", () => submitAuth("register"));
+  logoutBtn?.addEventListener("click", logout);
+  authPasswordInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submitAuth("login");
+  });
+}
+
+async function init() {
+  bindAuthEvents();
+  if (!appBootstrapped) {
+    const ok = await ensureAuthenticated();
+    if (!ok) {
+      checkHealth();
+      refreshIcons();
+      return;
+    }
+  }
+  appBootstrapped = true;
   applyTheme(getStoredTheme());
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
     if (!getStoredTheme()) applyTheme(e.matches ? "dark" : "light");
@@ -5669,9 +6058,11 @@ function init() {
   apiBaseInput.value = state.apiBase;
   rerankerBackend.value = stored.rerankerBackend || "local";
   if (generationProvider) {
-    generationProvider.value = stored.generationProvider || "gemini";
+    generationProvider.value = normalizeGenerationProvider(stored.generationProvider || "minimax");
+    if (onboardingProviderSelect) onboardingProviderSelect.value = generationProvider.value;
     syncProviderFields();
   }
+  syncProviderKeyLabels();
   preferRecent.checked = stored.preferRecent !== false;
   if (userSourcePriorityToggle) {
     userSourcePriorityToggle.checked = stored.preferUserSources !== false;
@@ -5692,6 +6083,7 @@ function init() {
   }
 
   bindEvents();
+  await loadProviderCatalog();
   setLibraryOpen(false);
   renderThread();
   renderEvidence();
@@ -5706,11 +6098,12 @@ function init() {
   syncGeminiRerankModelInputFromState();
   const supportShownThisSession = sessionStorage.getItem(SUPPORT_SESSION_KEY) === "1";
   if (!supportShownThisSession) {
-    setSupportOpen(true);
-    // Onboarding will open after support is dismissed (see dismissSupport)
-  } else if (!state.onboardingSeen) {
+    sessionStorage.setItem(SUPPORT_SESSION_KEY, "1");
+  }
+  setSupportOpen(false);
+  if (!state.onboardingSeen) {
     setOnboardingOpen(true);
-    setRequestState("Guia inicial aberto. Configure GEMINI_API_KEY para comecar.");
+    setRequestState("Guia inicial aberto. Configure a chave do provedor para comecar.");
   } else {
     setOnboardingOpen(false);
   }
@@ -5721,16 +6114,16 @@ function init() {
   }).catch(() => {});
   _autoCheckWatchTopics().catch(() => {});
   checkAutoUpdate().catch(() => {});
-  loadRagConfigMetadata();
-  loadTtsProviderConfig();
-  loadUserCorpusSources();
-  loadJurisUpdateLastStatus();
-  fetchGeminiStatus().then((hasKey) => {
+  loadRagConfigMetadata().then(() => fetchGeminiStatus()).then((hasKey) => {
     if (!hasKey) {
       setOnboardingOpen(true);
-      setRequestState("GEMINI_API_KEY obrigatoria para consultar. Configure no guia inicial.", true);
+      setRequestState("Chave do provedor de geracao ausente. Configure no guia inicial.", true);
     }
   }).catch(() => {});
+  loadTtsProviderConfig();
+  loadEmbeddingConfig();
+  loadUserCorpusSources();
+  loadJurisUpdateLastStatus();
 
   audioPlayer.ontimeupdate = () => {
     if (!state.speech.activeTurnId) return;

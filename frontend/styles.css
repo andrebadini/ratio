@@ -85,6 +85,144 @@ body[data-settings-open="true"] #overlay {
   pointer-events: auto;
 }
 
+body[data-auth-open="true"] #overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.auth-modal {
+  position: fixed;
+  z-index: 120;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  padding: clamp(18px, 4vh, 42px) 16px;
+  display: none;
+  place-items: center;
+  pointer-events: none;
+  -webkit-transform: translateZ(0); /* force Safari to create a new stacking context */
+}
+
+body[data-auth-open="true"] .auth-modal {
+  display: grid;
+  pointer-events: auto;
+}
+
+.auth-card {
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(92vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--stone-200);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    0 1px 2px rgba(28, 25, 23, 0.04),
+    0 18px 48px rgba(28, 25, 23, 0.14),
+    0 42px 90px rgba(28, 25, 23, 0.18);
+}
+
+.auth-card-mark {
+  width: 38px;
+  height: 38px;
+  margin: 28px auto 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--stone-900);
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(28, 25, 23, 0.18);
+}
+
+.auth-card-mark svg {
+  width: 19px;
+  height: 19px;
+}
+
+.auth-card-head {
+  padding: 0 28px 18px;
+  text-align: center;
+  border-bottom: 1px solid var(--stone-200);
+}
+
+.auth-card-head h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--stone-900);
+  white-space: normal;
+}
+
+.auth-card-head p {
+  margin: 10px auto 0;
+  max-width: 32ch;
+  color: var(--stone-500);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.auth-body {
+  display: grid;
+  gap: 14px;
+  padding: 22px 28px 26px;
+}
+
+.auth-body .field {
+  gap: 7px;
+}
+
+.auth-body input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--stone-200);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--stone-900);
+  font: 500 14px/1.2 "Inter", sans-serif;
+  padding: 0 12px;
+}
+
+.auth-body input:focus {
+  outline: 2px solid rgba(120, 113, 108, 0.18);
+  border-color: var(--stone-400);
+}
+
+.auth-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.auth-primary-btn,
+.auth-secondary-btn {
+  width: 100%;
+  min-height: 40px;
+  justify-content: center;
+}
+
+.auth-footnote {
+  margin: 0;
+  color: var(--stone-500);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+body[data-auth-open="true"] .app-shell,
+body[data-auth-open="true"] .left-rail,
+body[data-auth-open="true"] .settings-panel,
+body[data-auth-open="true"] .library-panel {
+  pointer-events: none;
+  filter: blur(1px);
+}
+
 body[data-acervo-open="true"] #overlay {
   opacity: 1;
   pointer-events: auto;

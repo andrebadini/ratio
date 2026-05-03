@@ -13,12 +13,15 @@ Flow:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
 import html
 import json
 import math
 import os
 import random
 import re
+import requests
 import subprocess
 import sys
 import unicodedata
@@ -85,8 +88,22 @@ else:
 
 GEMINI_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 _CLIENT: Optional[genai.Client] = None
+_REQUEST_PROVIDER_CREDENTIALS: ContextVar[dict[str, str]] = ContextVar(
+    "ratio_request_provider_credentials",
+    default={},
+)
+_REQUEST_CLIENTS: ContextVar[dict[str, Any]] = ContextVar(
+    "ratio_request_clients",
+    default={},
+)
 
 SUPPORTED_GENERATION_MODELS: tuple[str, ...] = (
+    "gpt-5.5",
+    "gpt-5.2",
+    "gpt-5-mini",
+    "gpt-5.1",
+    "gpt-4.1",
+    "gpt-4.1-mini",
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
     "gemini-3-flash",
@@ -99,20 +116,102 @@ SUPPORTED_GENERATION_MODELS: tuple[str, ...] = (
 GEMINI_KEY_VALIDATION_MODEL = os.getenv("GEMINI_KEY_VALIDATION_MODEL", "gemini-2.5-flash")
 GEMINI_KEY_VALIDATION_TIMEOUT_MS = int(os.getenv("GEMINI_KEY_VALIDATION_TIMEOUT_MS", "12000"))
 
+# --- OpenAI-compatible providers -----------------------------------------
+OPENAI_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").strip().rstrip("/")
+DEEPSEEK_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/")
+MINIMAX_KEY = (os.getenv("MINIMAX_API_KEY") or "").strip()
+MINIMAX_BASE_URL = (os.getenv("MINIMAX_BASE_URL") or "https://api.minimax.io/v1").strip().rstrip("/")
+
+SUPPORTED_OPENAI_MODELS: tuple[str, ...] = (
+    "gpt-5.5",
+    "gpt-5.2",
+    "gpt-5-mini",
+    "gpt-5.1",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4o",
+    "gpt-4o-mini",
+)
+SUPPORTED_DEEPSEEK_MODELS: tuple[str, ...] = (
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "deepseek-chat",
+    "deepseek-reasoner",
+)
+SUPPORTED_MINIMAX_MODELS: tuple[str, ...] = (
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M2.5",
+    "MiniMax-M2.5-highspeed",
+    "MiniMax-M2.1",
+    "MiniMax-M2.1-highspeed",
+    "MiniMax-M2",
+)
+
 # --- Claude / Anthropic --------------------------------------------------
 ANTHROPIC_KEY = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 _ANTHROPIC_CLIENT: Optional[Any] = None
 
 SUPPORTED_CLAUDE_MODELS: tuple[str, ...] = (
-    "claude-sonnet-4-20250514",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
 )
 
-GENERATION_PROVIDER = os.getenv("GENERATION_PROVIDER", "gemini").strip().lower()
+GENERATION_PROVIDER = os.getenv("GENERATION_PROVIDER", "minimax").strip().lower()
+EMBEDDING_PROVIDER = (os.getenv("EMBEDDING_PROVIDER") or os.getenv("EMBED_PROVIDER") or "gemini").strip().lower()
+EMBED_MODEL = (os.getenv("EMBED_MODEL") or "gemini-embedding-001").strip() or "gemini-embedding-001"
+EMBEDDING_BASE_URL = (
+    os.getenv("EMBEDDING_BASE_URL")
+    or os.getenv("EMBED_BASE_URL")
+    or os.getenv("LM_STUDIO_BASE_URL")
+    or "http://127.0.0.1:1234/v1"
+).strip().rstrip("/")
+EMBEDDING_API_KEY = (os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio").strip()
+
+
+def _request_provider_key(provider: str) -> str:
+    normalized = (provider or "").strip().lower()
+    if normalized == "claude":
+        normalized = "anthropic"
+    return str((_REQUEST_PROVIDER_CREDENTIALS.get() or {}).get(normalized) or "").strip()
+
+
+def request_provider_credentials() -> dict[str, str]:
+    return dict(_REQUEST_PROVIDER_CREDENTIALS.get() or {})
+
+
+@contextmanager
+def provider_credentials_context(credentials: Optional[dict[str, str]] = None):
+    cleaned: dict[str, str] = {}
+    for raw_provider, raw_key in (credentials or {}).items():
+        provider = str(raw_provider or "").strip().lower()
+        key = str(raw_key or "").strip()
+        if provider and key:
+            cleaned[provider] = key
+    token = _REQUEST_PROVIDER_CREDENTIALS.set(cleaned)
+    client_token = _REQUEST_CLIENTS.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_PROVIDER_CREDENTIALS.reset(token)
+        _REQUEST_CLIENTS.reset(client_token)
 
 
 def get_supported_generation_models() -> list[str]:
-    return list(SUPPORTED_GENERATION_MODELS)
+    values: list[str] = []
+    for group in (
+        SUPPORTED_GENERATION_MODELS,
+        SUPPORTED_OPENAI_MODELS,
+        SUPPORTED_DEEPSEEK_MODELS,
+        SUPPORTED_MINIMAX_MODELS,
+    ):
+        for model in group:
+            if model not in values:
+                values.append(model)
+    return values
 
 
 def get_supported_claude_models() -> list[str]:
@@ -120,20 +219,191 @@ def get_supported_claude_models() -> list[str]:
 
 
 def has_gemini_api_key() -> bool:
-    return bool((GEMINI_KEY or "").strip())
+    return bool(_request_provider_key("gemini") or (GEMINI_KEY or "").strip())
 
 
 def has_anthropic_api_key() -> bool:
-    return bool((ANTHROPIC_KEY or "").strip())
+    return bool(_request_provider_key("anthropic") or (ANTHROPIC_KEY or "").strip())
+
+
+def has_openai_api_key() -> bool:
+    return bool(_request_provider_key("openai") or (OPENAI_KEY or "").strip())
+
+
+def has_deepseek_api_key() -> bool:
+    return bool(_request_provider_key("deepseek") or (DEEPSEEK_KEY or "").strip())
+
+
+def has_minimax_api_key() -> bool:
+    return bool(_request_provider_key("minimax") or (MINIMAX_KEY or "").strip())
+
+
+def _provider_env_key(provider: str) -> str:
+    return {
+        "openai": "OPENAI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+    }.get(provider, "API_KEY")
+
+
+def _openai_compatible_provider_config(provider: str) -> tuple[str, str]:
+    normalized = (provider or "").strip().lower()
+    if normalized == "openai":
+        return _request_provider_key("openai") or OPENAI_KEY, OPENAI_BASE_URL
+    if normalized == "deepseek":
+        return _request_provider_key("deepseek") or DEEPSEEK_KEY, DEEPSEEK_BASE_URL
+    if normalized == "minimax":
+        return _request_provider_key("minimax") or MINIMAX_KEY, MINIMAX_BASE_URL
+    raise RuntimeError(f"Provedor OpenAI-compatible invalido: {provider}")
+
+
+def _post_openai_compatible_json(
+    provider: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    key, base_url = _openai_compatible_provider_config(provider)
+    if not key:
+        raise RuntimeError(f"{_provider_env_key(provider)} ausente. Configure a chave do provedor.")
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict):
+                detail = json.dumps(parsed.get("error") or parsed, ensure_ascii=False)[:500]
+        except Exception:
+            pass
+        raise RuntimeError(f"Falha no provedor {provider} ({response.status_code}): {detail}")
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Resposta invalida do provedor {provider}.")
+    return data
+
+
+def configure_openai_compatible_api_key(
+    provider: str,
+    api_key: str,
+    *,
+    validate: bool = False,
+    test_model: Optional[str] = None,
+    validation_timeout_ms: int = 12000,
+) -> dict[str, Any]:
+    global OPENAI_KEY, DEEPSEEK_KEY, MINIMAX_KEY
+    normalized = (provider or "").strip().lower()
+    if normalized not in {"openai", "deepseek", "minimax"}:
+        raise RuntimeError("Provedor invalido.")
+    key = str(api_key or "").strip()
+    if not key:
+        raise RuntimeError(f"{_provider_env_key(normalized)} ausente. Informe uma chave valida.")
+
+    old_values = {"openai": OPENAI_KEY, "deepseek": DEEPSEEK_KEY, "minimax": MINIMAX_KEY}
+    if normalized == "openai":
+        OPENAI_KEY = key
+        os.environ["OPENAI_API_KEY"] = key
+        probe_model = (test_model or "gpt-4.1-mini").strip()
+    elif normalized == "deepseek":
+        DEEPSEEK_KEY = key
+        os.environ["DEEPSEEK_API_KEY"] = key
+        probe_model = (test_model or "deepseek-v4-flash").strip()
+    else:
+        MINIMAX_KEY = key
+        os.environ["MINIMAX_API_KEY"] = key
+        probe_model = (test_model or "MiniMax-M2.7-highspeed").strip()
+
+    try:
+        if validate:
+            _openai_compatible_chat(
+                provider=normalized,
+                model=probe_model,
+                system_prompt="Responda de forma curta.",
+                user_content="Responda somente: OK",
+                temperature=0.0,
+                max_tokens=8,
+                timeout=max(3.0, min(float(validation_timeout_ms) / 1000.0, 120.0)),
+            )
+    except Exception:
+        if normalized == "openai":
+            OPENAI_KEY = old_values["openai"]
+        elif normalized == "deepseek":
+            DEEPSEEK_KEY = old_values["deepseek"]
+        else:
+            MINIMAX_KEY = old_values["minimax"]
+        raise
+    return {"validated": bool(validate), "model": probe_model}
+
+
+def configure_embedding_provider(
+    provider: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    global EMBEDDING_PROVIDER, EMBED_MODEL, EMBEDDING_BASE_URL, EMBEDDING_API_KEY
+    normalized = (provider or "").strip().lower()
+    if normalized in {"lmstudio", "lm_studio", "lm-studio", "local"}:
+        normalized = "lm_studio"
+    if normalized in {"openai_compatible", "openai-compatible"}:
+        normalized = "openai_compatible"
+    if normalized not in {"gemini", "openai", "deepseek", "minimax", "lm_studio", "openai_compatible"}:
+        raise RuntimeError("Provedor de embedding invalido.")
+
+    model_value = (model or "").strip()
+    if not model_value:
+        model_value = "gemini-embedding-001" if normalized == "gemini" else "text-embedding-qwen3-embedding-0.6b"
+
+    base_value = (base_url or EMBEDDING_BASE_URL or "").strip().rstrip("/")
+    if normalized in {"lm_studio", "openai_compatible"} and not base_value:
+        base_value = "http://127.0.0.1:1234/v1"
+
+    key_value = (api_key or EMBEDDING_API_KEY or "").strip()
+    if normalized == "lm_studio" and not key_value:
+        key_value = "lm-studio"
+
+    EMBEDDING_PROVIDER = normalized
+    EMBED_MODEL = model_value
+    EMBEDDING_BASE_URL = base_value
+    EMBEDDING_API_KEY = key_value
+    os.environ["EMBEDDING_PROVIDER"] = normalized
+    os.environ["EMBED_MODEL"] = model_value
+    if base_value:
+        os.environ["EMBEDDING_BASE_URL"] = base_value
+    if key_value:
+        os.environ["EMBEDDING_API_KEY"] = key_value
+    return {
+        "provider": EMBEDDING_PROVIDER,
+        "model": EMBED_MODEL,
+        "base_url": EMBEDDING_BASE_URL,
+        "dimension": EMBED_DIM,
+    }
 
 
 def get_anthropic_client() -> Any:
     global _ANTHROPIC_CLIENT
-    key = (ANTHROPIC_KEY or "").strip()
+    request_key = _request_provider_key("anthropic")
+    key = (request_key or ANTHROPIC_KEY or "").strip()
     if not key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY ausente. Configure a chave Claude para usar geracao com Claude."
         )
+    if request_key:
+        clients = _REQUEST_CLIENTS.get()
+        cached = clients.get("anthropic")
+        if cached is not None:
+            return cached
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        clients["anthropic"] = client
+        return client
     if _ANTHROPIC_CLIENT is None:
         import anthropic
         _ANTHROPIC_CLIENT = anthropic.Anthropic(api_key=key)
@@ -175,11 +445,20 @@ def _reset_runtime_model_cache() -> None:
 
 def get_gemini_client() -> genai.Client:
     global _CLIENT
-    key = (GEMINI_KEY or "").strip()
+    request_key = _request_provider_key("gemini")
+    key = (request_key or GEMINI_KEY or "").strip()
     if not key:
         raise RuntimeError(
             "GEMINI_API_KEY ausente. Configure a chave Gemini para usar embeddings e geracao."
         )
+    if request_key:
+        clients = _REQUEST_CLIENTS.get()
+        cached = clients.get("gemini")
+        if cached is not None:
+            return cached
+        client = genai.Client(api_key=key)
+        clients["gemini"] = client
+        return client
     if _CLIENT is None:
         _CLIENT = genai.Client(api_key=key)
     return _CLIENT
@@ -257,7 +536,7 @@ EMBED_DIM = 768
 NATIVE_SOURCE_CONFIG: dict[str, dict[str, str]] = {
     "ratio": {
         "table_name": "jurisprudencia",
-        "label": "Base Ratio (STF/STJ)",
+        "label": "Base DataJus (STF/STJ)",
         "kind": "ratio",
     },
     "tjsp": {
@@ -297,8 +576,8 @@ MONOCRATIC_BINDING_PENALTY = float(os.getenv("MONOCRATIC_BINDING_PENALTY", "0.12
 USER_SOURCE_PRIORITY_BOOST = float(os.getenv("USER_SOURCE_PRIORITY_BOOST", "0.08"))
 EXPLAIN_MODEL = os.getenv("EXPLAIN_MODEL", "gemini-3.1-pro-preview")
 EXPLAIN_DOCS_LIMIT = int(os.getenv("EXPLAIN_DOCS_LIMIT", "4"))
-GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gemini-3-flash-preview")
-GENERATION_FALLBACK_MODEL = os.getenv("GENERATION_FALLBACK_MODEL", "gemini-2.5-flash")
+GENERATION_MODEL = os.getenv("GENERATION_MODEL", "MiniMax-M2.7-highspeed")
+GENERATION_FALLBACK_MODEL = os.getenv("GENERATION_FALLBACK_MODEL", "MiniMax-M2.7-highspeed")
 GENERATION_MAX_OUTPUT_TOKENS = int(os.getenv("GENERATION_MAX_OUTPUT_TOKENS", "3600"))
 GENERATION_THINKING_BUDGET = int(os.getenv("GENERATION_THINKING_BUDGET", "128"))
 PARAGRAPH_CITATION_MIN_CHARS = int(os.getenv("PARAGRAPH_CITATION_MIN_CHARS", "120"))
@@ -732,7 +1011,7 @@ def get_rag_tuning_schema() -> list[dict[str, Any]]:
             "step": 0.01,
             "help": "Aplicado quando a opcao de priorizar documentos do usuario estiver habilitada.",
             "impact_more": "Traz mais documentos do Meu Acervo para o topo quando relevantes.",
-            "impact_less": "Deixa o ranking mais neutro entre base Ratio e base do usuario.",
+            "impact_less": "Deixa o ranking mais neutro entre base DataJus e base do usuario.",
         },
         {
             "key": "procedural_penalty_weight",
@@ -843,11 +1122,11 @@ def get_rag_tuning_schema() -> list[dict[str, Any]]:
             "label": "Provedor de Geracao",
             "group": "Modelo de Resposta",
             "type": "string",
-            "options": ["gemini", "claude"],
+            "options": ["gemini", "claude", "openai", "deepseek", "minimax"],
             "help": "Selecione qual API sera usada para gerar respostas e explicacoes. Requer chave do provedor selecionado.",
-            "tip": "Recomendado: Claude. Tende a produzir respostas com maior aderencia as regras do sistema, profundidade argumentativa e qualidade de citacao em portugues juridico. Gemini oferece menor custo e funciona sem chave adicional.",
-            "impact_more": "Claude: respostas mais estruturadas e com maior fidelidade ao sistema de regras.",
-            "impact_less": "Gemini: menor custo, integracao nativa com embeddings e reranker.",
+            "tip": "Use Gemini para integracao nativa, Claude/OpenAI para redacao, DeepSeek para alternativa OpenAI-compatible e MiniMax para contexto longo.",
+            "impact_more": "Mais provedores permitem comparar qualidade, custo, latencia e disponibilidade.",
+            "impact_less": "Gemini mantem a integracao nativa com embeddings e reranker.",
         },
         {
             "key": "generation_temperature",
@@ -1290,33 +1569,100 @@ def min_max_scale(values: list[float]) -> list[float]:
     return [(v - low) / (high - low) for v in values]
 
 
-def _embed_query_config(*, include_task_type: bool) -> types.EmbedContentConfig:
+def _embed_query_config(*, include_task_type: bool, task_type: str = "RETRIEVAL_QUERY") -> types.EmbedContentConfig:
     config_kwargs: dict[str, Any] = {
         "output_dimensionality": EMBED_DIM,
     }
     if include_task_type:
-        config_kwargs["task_type"] = "RETRIEVAL_QUERY"
+        config_kwargs["task_type"] = task_type
     return types.EmbedContentConfig(**config_kwargs)
 
 
-def embed_query(query: str) -> list[float]:
+def _embedding_provider_normalized() -> str:
+    value = (EMBEDDING_PROVIDER or "gemini").strip().lower()
+    if value in {"lmstudio", "lm_studio", "lm-studio", "local", "openai_compatible", "openai-compatible"}:
+        return "openai_compatible"
+    if value in {"openai", "deepseek", "minimax"}:
+        return "openai_compatible"
+    return "gemini"
+
+
+def _embed_openai_compatible(texts: list[str], *, model: str = EMBED_MODEL) -> list[list[float]]:
+    if not texts:
+        return []
+    provider_key = _request_provider_key(EMBEDDING_PROVIDER)
+    api_key = provider_key or EMBEDDING_API_KEY
+    url = f"{EMBEDDING_BASE_URL.rstrip('/')}/embeddings"
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"model": model, "input": texts},
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Falha no embedding OpenAI-compatible ({response.status_code}): {response.text[:500]}")
+    payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise RuntimeError("Resposta de embedding OpenAI-compatible sem campo data.")
+    vectors: list[list[float]] = []
+    for item in sorted((x for x in data if isinstance(x, dict)), key=lambda x: int(x.get("index", 0) or 0)):
+        embedding = item.get("embedding")
+        if not isinstance(embedding, list):
+            raise RuntimeError("Resposta de embedding OpenAI-compatible sem vetor embedding.")
+        vectors.append([float(v) for v in embedding])
+    if len(vectors) != len(texts):
+        raise RuntimeError("Provedor de embedding retornou quantidade inesperada de vetores.")
+    return vectors
+
+
+def embed_texts(texts: list[str], *, task_type: str = "RETRIEVAL_QUERY") -> list[list[float]]:
+    cleaned = [str(t or "") for t in texts]
+    if not cleaned:
+        return []
+    if _embedding_provider_normalized() == "openai_compatible":
+        return _embed_openai_compatible(cleaned)
+
     client = get_gemini_client()
+    include_task_type = task_type in {"RETRIEVAL_QUERY", "RETRIEVAL_DOCUMENT"}
     try:
         result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=[query],
-            config=_embed_query_config(include_task_type=True),
+            model=EMBED_MODEL,
+            contents=cleaned,
+            config=_embed_query_config(include_task_type=include_task_type, task_type=task_type),
         )
     except ValueError as exc:
         message = str(exc)
-        if "requests[]" not in message or "RETRIEVAL_QUERY" not in message:
+        if "requests[]" not in message and "task_type" not in message and "RETRIEVAL" not in message:
             raise
         result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=[query],
-            config=_embed_query_config(include_task_type=False),
+            model=EMBED_MODEL,
+            contents=cleaned,
+            config=_embed_query_config(include_task_type=False, task_type=task_type),
         )
-    return result.embeddings[0].values
+    embeddings = getattr(result, "embeddings", None) or []
+    vectors: list[list[float]] = []
+    for item in embeddings:
+        values = getattr(item, "values", None)
+        if values is None:
+            raise RuntimeError("Embedding Gemini retornou objeto sem values.")
+        vectors.append(list(values))
+    if len(vectors) != len(cleaned):
+        raise RuntimeError("Provedor de embedding retornou quantidade inesperada de vetores.")
+    return vectors
+
+
+def embed_query(query: str) -> list[float]:
+    vectors = embed_texts([query], task_type="RETRIEVAL_QUERY")
+    if not vectors:
+        raise RuntimeError("Falha ao gerar embedding da consulta.")
+    vector = vectors[0]
+    if len(vector) != EMBED_DIM:
+        raise RuntimeError(
+            f"Embedding retornou {len(vector)} dimensoes, mas o indice atual espera {EMBED_DIM}. "
+            "Use o mesmo provedor/modelo usado na indexacao ou reindexe a base com esse modelo."
+        )
+    return vector
 
 
 def _quote_sql(value: str) -> str:
@@ -2956,16 +3302,71 @@ def _claude_generate_text(
     return text, finish
 
 
+def _openai_compatible_chat(
+    *,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    timeout: float = 120.0,
+) -> tuple[str, str]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": max(0.0, min(float(temperature), 1.0)),
+        "max_tokens": max(8, int(max_tokens)),
+    }
+    if (provider or "").strip().lower() == "minimax":
+        payload["reasoning_split"] = True
+    data = _post_openai_compatible_json(provider, "/chat/completions", payload, timeout=timeout)
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError(f"Resposta sem choices do provedor {provider}.")
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first, dict) else {}
+    if not isinstance(message, dict):
+        message = {}
+    text = str(message.get("content") or "").strip()
+    finish_reason = str(first.get("finish_reason") or "").upper()
+    finish = "MAX_TOKENS" if finish_reason in {"LENGTH", "MAX_TOKENS"} else f"FINISHREASON.{finish_reason or 'STOP'}"
+    return text, finish
+
+
+def _resolve_openai_compatible_model(provider: str, model_hint: str) -> str:
+    hint = (model_hint or "").strip()
+    normalized = (provider or "").strip().lower()
+    if normalized == "openai":
+        if hint.startswith(("gpt-", "o")):
+            return hint
+        return "gpt-5-mini"
+    if normalized == "deepseek":
+        if hint.startswith("deepseek-"):
+            return hint
+        return "deepseek-v4-flash"
+    if normalized == "minimax":
+        if hint.lower().startswith("minimax-"):
+            return hint
+        return "MiniMax-M2.7-highspeed"
+    return hint
+
+
 def _resolve_claude_model(model_hint: str) -> str:
     """Map Gemini model names or generic hints to a valid Claude model ID."""
     hint = (model_hint or "").strip().lower()
     if hint.startswith("claude-"):
         return model_hint.strip()
-    if "pro" in hint or "sonnet" in hint:
-        return "claude-sonnet-4-20250514"
+    if "opus" in hint or "pro" in hint:
+        return "claude-opus-4-7"
+    if "sonnet" in hint:
+        return "claude-sonnet-4-6"
     if "flash" in hint or "haiku" in hint:
         return "claude-haiku-4-5-20251001"
-    return "claude-sonnet-4-20250514"
+    return "claude-sonnet-4-6"
 
 
 def get_persona_prompt_defaults() -> dict[str, str]:
@@ -3238,10 +3639,37 @@ da prosa com conectivo de fechamento ("Em suma,...",
                 diagnostics["selected_hit_max_tokens"] = True
                 return _result(text)
         except Exception as exc:
-            print(f"Claude generation warning ({claude_model}): {exc}. Falling back to Gemini.", file=sys.stderr)
             _record_attempt(claude_model, f"ERROR:{exc.__class__.__name__}", "")
+            raise
+    elif provider == "claude":
+        raise RuntimeError("ANTHROPIC_API_KEY ausente para o usuario atual.")
 
-    # --- Gemini provider path (default / fallback) ---
+    if provider in {"openai", "deepseek", "minimax"}:
+        provider_model = _resolve_openai_compatible_model(provider, generation_model)
+        try:
+            text, finish_reason = _openai_compatible_chat(
+                provider=provider,
+                model=provider_model,
+                system_prompt=system_prompt,
+                user_content=user_query_payload,
+                temperature=max(0.0, min(float(generation_temperature), 1.0)),
+                max_tokens=max(300, int(generation_max_output_tokens)),
+            )
+            hit_max = _record_attempt(provider_model, finish_reason, text)
+            diagnostics["primary_hit_max_tokens"] = bool(hit_max)
+            if text:
+                diagnostics["selected_model"] = provider_model
+                diagnostics["used_fallback"] = False
+                diagnostics["selected_hit_max_tokens"] = bool(hit_max)
+                return _result(text)
+        except Exception as exc:
+            _record_attempt(provider_model, f"ERROR:{exc.__class__.__name__}", "")
+            raise
+
+    if provider != "gemini":
+        raise RuntimeError(f"Provedor de geracao indisponivel ou sem chave: {provider}.")
+
+    # --- Gemini provider path (default) ---
     primary_model = _resolve_best_gemini_model(generation_model)
     fallback_model = (
         _resolve_best_gemini_model(generation_fallback_model)
@@ -3758,7 +4186,28 @@ def explain_answer(
             if text:
                 return text
         except Exception as exc:
-            print(f"Claude explain warning: {exc}. Falling back to Gemini.", file=sys.stderr)
+            raise
+    elif provider == "claude":
+        raise RuntimeError("ANTHROPIC_API_KEY ausente para o usuario atual.")
+
+    if provider in {"openai", "deepseek", "minimax"}:
+        try:
+            provider_model = _resolve_openai_compatible_model(provider, model_name)
+            text, _ = _openai_compatible_chat(
+                provider=provider,
+                model=provider_model,
+                system_prompt=system_prompt,
+                user_content=user_prompt,
+                temperature=0.2,
+                max_tokens=800,
+            )
+            if text:
+                return text
+        except Exception as exc:
+            raise
+
+    if provider != "gemini":
+        raise RuntimeError(f"Provedor de explicacao indisponivel ou sem chave: {provider}.")
 
     # --- Gemini provider path ---
     primary_model = _resolve_best_gemini_model(model_name)
