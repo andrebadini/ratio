@@ -55,6 +55,16 @@ class _FakeEmbedClient:
         self.models = _FakeEmbedModels()
 
 
+class _FakeEmbeddingHttpResponse:
+    def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+
 def test_generate_answer_uses_fallback_when_primary_hits_max_tokens(monkeypatch):
     fake_client = _FakeClient(
         [
@@ -79,6 +89,9 @@ def test_generate_answer_uses_fallback_when_primary_hits_max_tokens(monkeypatch)
 def test_embed_query_retries_without_task_type_when_sdk_rejects_batch_path(monkeypatch):
     fake_client = _FakeEmbedClient()
     monkeypatch.setattr(query_mod, "get_gemini_client", lambda: fake_client)
+    monkeypatch.setattr(query_mod, "EMBEDDING_PROVIDER", "gemini")
+    monkeypatch.setattr(query_mod, "EMBED_DIM", 3)
+    monkeypatch.setattr(query_mod, "has_gemini_api_key", lambda: True)
 
     values = query_mod.embed_query("responsabilidade civil por fraude em concurso")
 
@@ -86,6 +99,65 @@ def test_embed_query_retries_without_task_type_when_sdk_rejects_batch_path(monke
     assert len(fake_client.models.configs) == 2
     assert getattr(fake_client.models.configs[0], "task_type", None) == "RETRIEVAL_QUERY"
     assert getattr(fake_client.models.configs[1], "task_type", None) is None
+
+
+def test_openai_compatible_embedding_uses_local_fallback_when_remote_fails(monkeypatch):
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):  # noqa: ANN001
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        if len(calls) == 1:
+            return _FakeEmbeddingHttpResponse(503, text="remote unavailable")
+        return _FakeEmbeddingHttpResponse(
+            200,
+            {
+                "data": [
+                    {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+                    {"index": 1, "embedding": [0.4, 0.5, 0.6]},
+                ]
+            },
+        )
+
+    monkeypatch.setattr(query_mod.requests, "post", fake_post)
+    monkeypatch.setattr(query_mod, "EMBEDDING_PROVIDER", "lm_studio")
+    monkeypatch.setattr(query_mod, "EMBED_MODEL", "text-embedding-embeddinggemma-300m")
+    monkeypatch.setattr(query_mod, "EMBEDDING_BASE_URL", "http://100.80.18.44:8000/v1")
+    monkeypatch.setattr(query_mod, "EMBEDDING_API_KEY", "remote-key")
+    monkeypatch.setattr(query_mod, "EMBEDDING_FALLBACK_ENABLED", True, raising=False)
+    monkeypatch.setattr(query_mod, "EMBEDDING_FALLBACK_BASE_URL", "http://127.0.0.1:1234/v1", raising=False)
+    monkeypatch.setattr(query_mod, "EMBEDDING_FALLBACK_API_KEY", "lm-studio", raising=False)
+    monkeypatch.setattr(query_mod, "EMBEDDING_FALLBACK_MODEL", "text-embedding-embeddinggemma-300m", raising=False)
+    monkeypatch.setattr(query_mod, "EMBED_DIM", 3)
+
+    vectors = query_mod.embed_texts(["consulta um", "consulta dois"])
+
+    assert vectors == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    assert [call["url"] for call in calls] == [
+        "http://100.80.18.44:8000/v1/embeddings",
+        "http://127.0.0.1:1234/v1/embeddings",
+    ]
+    assert calls[0]["headers"]["Authorization"] == "Bearer remote-key"
+    assert calls[1]["headers"]["Authorization"] == "Bearer lm-studio"
+    assert all(call["json"]["model"] == "text-embedding-embeddinggemma-300m" for call in calls)
+
+
+def test_embed_texts_rejects_openai_compatible_dimension_mismatch(monkeypatch):
+    def fake_post(url, *, headers, json, timeout):  # noqa: ANN001
+        return _FakeEmbeddingHttpResponse(
+            200,
+            {"data": [{"index": 0, "embedding": [0.1, 0.2]}]},
+        )
+
+    monkeypatch.setattr(query_mod.requests, "post", fake_post)
+    monkeypatch.setattr(query_mod, "EMBEDDING_PROVIDER", "lm_studio")
+    monkeypatch.setattr(query_mod, "EMBED_MODEL", "text-embedding-embeddinggemma-300m")
+    monkeypatch.setattr(query_mod, "EMBEDDING_BASE_URL", "http://100.80.18.44:8000/v1")
+    monkeypatch.setattr(query_mod, "EMBEDDING_API_KEY", "remote-key")
+    monkeypatch.setattr(query_mod, "EMBEDDING_FALLBACK_ENABLED", False, raising=False)
+    monkeypatch.setattr(query_mod, "EMBED_DIM", 3)
+
+    with pytest.raises(RuntimeError, match="Embedding retornou 2 dimensoes"):
+        query_mod.embed_texts(["consulta"])
 
 
 def test_build_generation_config_notice_reports_max_tokens_and_fallback():

@@ -69,8 +69,8 @@ const PROVIDER_KEY_META = {
 };
 const EMBEDDING_DEFAULTS = {
   gemini: { model: "gemini-embedding-001", baseUrl: "" },
-  lm_studio: { model: "text-embedding-qwen3-embedding-0.6b", baseUrl: "http://127.0.0.1:1234/v1" },
-  openai_compatible: { model: "text-embedding-qwen3-embedding-0.6b", baseUrl: "http://127.0.0.1:1234/v1" },
+  lm_studio: { model: "text-embedding-embeddinggemma-300m", baseUrl: "http://100.80.18.44:8000/v1" },
+  openai_compatible: { model: "text-embedding-embeddinggemma-300m", baseUrl: "http://127.0.0.1:1234/v1" },
   openai: { model: "text-embedding-3-small", baseUrl: "https://api.openai.com/v1" }
 };
 

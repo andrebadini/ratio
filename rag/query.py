@@ -170,6 +170,20 @@ EMBEDDING_BASE_URL = (
     or "http://127.0.0.1:1234/v1"
 ).strip().rstrip("/")
 EMBEDDING_API_KEY = (os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio").strip()
+EMBEDDING_FALLBACK_ENABLED = (
+    (os.getenv("EMBEDDING_FALLBACK_ENABLED") or "1").strip().lower() not in {"0", "false", "no", "off"}
+)
+EMBEDDING_FALLBACK_MODEL = (
+    os.getenv("EMBEDDING_FALLBACK_MODEL") or "text-embedding-embeddinggemma-300m"
+).strip() or "text-embedding-embeddinggemma-300m"
+EMBEDDING_FALLBACK_BASE_URL = (
+    os.getenv("EMBEDDING_FALLBACK_BASE_URL")
+    or os.getenv("LM_STUDIO_FALLBACK_BASE_URL")
+    or "http://127.0.0.1:1234/v1"
+).strip().rstrip("/")
+EMBEDDING_FALLBACK_API_KEY = (
+    os.getenv("EMBEDDING_FALLBACK_API_KEY") or os.getenv("LM_STUDIO_FALLBACK_API_KEY") or "lm-studio"
+).strip()
 
 
 def _request_provider_key(provider: str) -> str:
@@ -359,7 +373,7 @@ def configure_embedding_provider(
 
     model_value = (model or "").strip()
     if not model_value:
-        model_value = "gemini-embedding-001" if normalized == "gemini" else "text-embedding-qwen3-embedding-0.6b"
+        model_value = "gemini-embedding-001" if normalized == "gemini" else "text-embedding-embeddinggemma-300m"
 
     base_value = (base_url or EMBEDDING_BASE_URL or "").strip().rstrip("/")
     if normalized in {"lm_studio", "openai_compatible"} and not base_value:
@@ -1587,33 +1601,87 @@ def _embedding_provider_normalized() -> str:
     return "gemini"
 
 
-def _embed_openai_compatible(texts: list[str], *, model: str = EMBED_MODEL) -> list[list[float]]:
-    if not texts:
-        return []
-    provider_key = _request_provider_key(EMBEDDING_PROVIDER)
-    api_key = provider_key or EMBEDDING_API_KEY
-    url = f"{EMBEDDING_BASE_URL.rstrip('/')}/embeddings"
+def _parse_openai_compatible_embedding_response(response: Any, texts: list[str], *, provider_label: str) -> list[list[float]]:
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Falha no embedding OpenAI-compatible {provider_label} ({response.status_code}): {response.text[:500]}"
+        )
+    payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise RuntimeError(f"Resposta de embedding OpenAI-compatible {provider_label} sem campo data.")
+    vectors: list[list[float]] = []
+    for item in sorted((x for x in data if isinstance(x, dict)), key=lambda x: int(x.get("index", 0) or 0)):
+        embedding = item.get("embedding")
+        if not isinstance(embedding, list):
+            raise RuntimeError(f"Resposta de embedding OpenAI-compatible {provider_label} sem vetor embedding.")
+        vectors.append([float(v) for v in embedding])
+    if len(vectors) != len(texts):
+        raise RuntimeError(f"Provedor de embedding {provider_label} retornou quantidade inesperada de vetores.")
+    return vectors
+
+
+def _request_openai_compatible_embeddings(
+    texts: list[str],
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
+    provider_label: str,
+) -> list[list[float]]:
+    url = f"{base_url.rstrip('/')}/embeddings"
     response = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": model, "input": texts},
         timeout=120,
     )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Falha no embedding OpenAI-compatible ({response.status_code}): {response.text[:500]}")
-    payload = response.json()
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        raise RuntimeError("Resposta de embedding OpenAI-compatible sem campo data.")
-    vectors: list[list[float]] = []
-    for item in sorted((x for x in data if isinstance(x, dict)), key=lambda x: int(x.get("index", 0) or 0)):
-        embedding = item.get("embedding")
-        if not isinstance(embedding, list):
-            raise RuntimeError("Resposta de embedding OpenAI-compatible sem vetor embedding.")
-        vectors.append([float(v) for v in embedding])
-    if len(vectors) != len(texts):
-        raise RuntimeError("Provedor de embedding retornou quantidade inesperada de vetores.")
-    return vectors
+    return _parse_openai_compatible_embedding_response(response, texts, provider_label=provider_label)
+
+
+def _embedding_fallback_is_distinct(*, model: str, base_url: str, api_key: str) -> bool:
+    fallback_base = (EMBEDDING_FALLBACK_BASE_URL or "").strip().rstrip("/")
+    if not fallback_base:
+        return False
+    primary = (base_url or "").strip().rstrip("/")
+    fallback_model = (EMBEDDING_FALLBACK_MODEL or model or "").strip()
+    fallback_key = (EMBEDDING_FALLBACK_API_KEY or "").strip()
+    return (fallback_base, fallback_model, fallback_key) != (primary, model, api_key)
+
+
+def _embed_openai_compatible(texts: list[str], *, model: str = EMBED_MODEL) -> list[list[float]]:
+    if not texts:
+        return []
+    provider_key = _request_provider_key(EMBEDDING_PROVIDER)
+    api_key = provider_key or EMBEDDING_API_KEY
+    try:
+        return _request_openai_compatible_embeddings(
+            texts,
+            model=model,
+            base_url=EMBEDDING_BASE_URL,
+            api_key=api_key,
+            provider_label="primario",
+        )
+    except Exception as primary_exc:
+        if not EMBEDDING_FALLBACK_ENABLED or not _embedding_fallback_is_distinct(
+            model=model,
+            base_url=EMBEDDING_BASE_URL,
+            api_key=api_key,
+        ):
+            raise
+        try:
+            return _request_openai_compatible_embeddings(
+                texts,
+                model=EMBEDDING_FALLBACK_MODEL or model,
+                base_url=EMBEDDING_FALLBACK_BASE_URL,
+                api_key=EMBEDDING_FALLBACK_API_KEY,
+                provider_label="fallback",
+            )
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"Falha no embedding OpenAI-compatible primario e fallback. "
+                f"Primario: {primary_exc}. Fallback: {fallback_exc}"
+            ) from fallback_exc
 
 
 def embed_texts(texts: list[str], *, task_type: str = "RETRIEVAL_QUERY") -> list[list[float]]:
@@ -1621,7 +1689,14 @@ def embed_texts(texts: list[str], *, task_type: str = "RETRIEVAL_QUERY") -> list
     if not cleaned:
         return []
     if _embedding_provider_normalized() == "openai_compatible":
-        return _embed_openai_compatible(cleaned)
+        vectors = _embed_openai_compatible(cleaned, model=EMBED_MODEL)
+        for vector in vectors:
+            if len(vector) != EMBED_DIM:
+                raise RuntimeError(
+                    f"Embedding retornou {len(vector)} dimensoes, mas o indice atual espera {EMBED_DIM}. "
+                    "Use o mesmo provedor/modelo usado na indexacao ou reindexe a base com esse modelo."
+                )
+        return vectors
 
     client = get_gemini_client()
     include_task_type = task_type in {"RETRIEVAL_QUERY", "RETRIEVAL_DOCUMENT"}
@@ -1649,6 +1724,12 @@ def embed_texts(texts: list[str], *, task_type: str = "RETRIEVAL_QUERY") -> list
         vectors.append(list(values))
     if len(vectors) != len(cleaned):
         raise RuntimeError("Provedor de embedding retornou quantidade inesperada de vetores.")
+    for vector in vectors:
+        if len(vector) != EMBED_DIM:
+            raise RuntimeError(
+                f"Embedding retornou {len(vector)} dimensoes, mas o indice atual espera {EMBED_DIM}. "
+                "Use o mesmo provedor/modelo usado na indexacao ou reindexe a base com esse modelo."
+            )
     return vectors
 
 
@@ -1657,11 +1738,6 @@ def embed_query(query: str) -> list[float]:
     if not vectors:
         raise RuntimeError("Falha ao gerar embedding da consulta.")
     vector = vectors[0]
-    if len(vector) != EMBED_DIM:
-        raise RuntimeError(
-            f"Embedding retornou {len(vector)} dimensoes, mas o indice atual espera {EMBED_DIM}. "
-            "Use o mesmo provedor/modelo usado na indexacao ou reindexe a base com esse modelo."
-        )
     return vector
 
 
@@ -1987,10 +2063,17 @@ def get_recent_timeline_items(
             continue
 
         try:
-            lance_ds = tbl.to_lance()
-            available_cols = set(lance_ds.schema.names)
+            schema_names = getattr(getattr(tbl, "schema", None), "names", None)
+            available_cols = set(schema_names or [])
             select_cols = [c for c in _TIMELINE_COLUMNS if c in available_cols]
-            arrow_table = lance_ds.to_table(columns=select_cols, filter=where_str)
+            if hasattr(tbl, "search"):
+                arrow_table = tbl.search().where(where_str).select(select_cols).to_arrow()
+            else:
+                lance_ds = tbl.to_lance()
+                if not select_cols:
+                    ds_schema_names = getattr(getattr(lance_ds, "schema", None), "names", None)
+                    select_cols = [c for c in _TIMELINE_COLUMNS if c in set(ds_schema_names or [])]
+                arrow_table = lance_ds.to_table(columns=select_cols or None, filter=where_str)
             rows.extend(arrow_table.to_pylist())
         except Exception as exc:
             print(f"Timeline: scan failed for {source_cfg['table_name']}: {exc}", file=sys.stderr)

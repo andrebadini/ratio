@@ -116,9 +116,12 @@ OPENAI_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "OPENAI_BASE_URL", os.getenv("O
 DEEPSEEK_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "DEEPSEEK_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))).strip().rstrip("/")
 MINIMAX_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "MINIMAX_BASE_URL", os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1"))).strip().rstrip("/")
 EMBED_DIM = int(getattr(_RAG_QUERY_MODULE, "EMBED_DIM", 768))
-EMBED_MODEL = str(getattr(_RAG_QUERY_MODULE, "EMBED_MODEL", os.getenv("EMBED_MODEL", "gemini-embedding-001")))
-EMBEDDING_PROVIDER = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "gemini")))
+EMBED_MODEL = str(getattr(_RAG_QUERY_MODULE, "EMBED_MODEL", os.getenv("EMBED_MODEL", "text-embedding-embeddinggemma-300m")))
+EMBEDDING_PROVIDER = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "lm_studio")))
 EMBEDDING_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_BASE_URL", os.getenv("EMBEDDING_BASE_URL", "http://127.0.0.1:1234/v1")))
+EMBEDDING_FALLBACK_ENABLED = bool(getattr(_RAG_QUERY_MODULE, "EMBEDDING_FALLBACK_ENABLED", os.getenv("EMBEDDING_FALLBACK_ENABLED", "1").strip() != "0"))
+EMBEDDING_FALLBACK_MODEL = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_FALLBACK_MODEL", os.getenv("EMBEDDING_FALLBACK_MODEL", "text-embedding-embeddinggemma-300m")))
+EMBEDDING_FALLBACK_BASE_URL = str(getattr(_RAG_QUERY_MODULE, "EMBEDDING_FALLBACK_BASE_URL", os.getenv("EMBEDDING_FALLBACK_BASE_URL", "http://127.0.0.1:1234/v1")))
 configure_embedding_provider = getattr(_RAG_QUERY_MODULE, "configure_embedding_provider", None)
 configure_openai_compatible_api_key = getattr(_RAG_QUERY_MODULE, "configure_openai_compatible_api_key", None)
 has_openai_api_key = getattr(_RAG_QUERY_MODULE, "has_openai_api_key", lambda: bool((os.getenv("OPENAI_API_KEY") or "").strip()))
@@ -2630,10 +2633,10 @@ PROVIDER_CATALOG: dict[str, Any] = {
             },
             {
                 "id": "lm_studio",
-                "label": "LM Studio local",
-                "base_url": "http://127.0.0.1:1234/v1",
+                "label": "EmbeddingGemma 300M (TEI Ubuntu)",
+                "base_url": "http://100.80.18.44:8000/v1",
                 "models": [
-                    {"id": "text-embedding-qwen3-embedding-0.6b", "label": "Qwen3 Embedding 0.6B", "default": True},
+                    {"id": "text-embedding-embeddinggemma-300m", "label": "EmbeddingGemma 300M (768)", "tier": "top", "default": True},
                 ],
             },
         ],
@@ -2692,6 +2695,29 @@ def _catalog_model_ids(section: str, provider: str) -> set[str]:
 
 def _catalog_provider_ids(section: str) -> set[str]:
     return {str(item.get("id") or "").strip() for item in PROVIDER_CATALOG.get(section, {}).get("providers", [])}
+
+
+def _embedding_runtime_status() -> dict[str, Any]:
+    rq = sys.modules.get("rag.query")
+    provider = str(getattr(rq, "EMBEDDING_PROVIDER", EMBEDDING_PROVIDER) or "lm_studio")
+    model = str(getattr(rq, "EMBED_MODEL", EMBED_MODEL) or "text-embedding-embeddinggemma-300m")
+    base_url = str(getattr(rq, "EMBEDDING_BASE_URL", EMBEDDING_BASE_URL) or "").rstrip("/")
+    dimension = int(getattr(rq, "EMBED_DIM", EMBED_DIM) or 768)
+    fallback_enabled = bool(getattr(rq, "EMBEDDING_FALLBACK_ENABLED", EMBEDDING_FALLBACK_ENABLED))
+    fallback_model = str(getattr(rq, "EMBEDDING_FALLBACK_MODEL", EMBEDDING_FALLBACK_MODEL) or model)
+    fallback_base_url = str(getattr(rq, "EMBEDDING_FALLBACK_BASE_URL", EMBEDDING_FALLBACK_BASE_URL) or "").rstrip("/")
+    return {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "dimension": dimension,
+        "fallback": {
+            "enabled": fallback_enabled,
+            "provider": "lm_studio",
+            "model": fallback_model,
+            "base_url": fallback_base_url,
+        },
+    }
 
 
 def _utc_now_iso() -> str:
@@ -2814,8 +2840,8 @@ def providers_catalog_api() -> dict[str, Any]:
             "generation_fallback_model": "MiniMax-M2.7-highspeed",
             "tts_provider": "minimax",
             "tts_model": "speech-2.8-hd",
-            "embedding_provider": "gemini",
-            "embedding_model": "gemini-embedding-001",
+            "embedding_provider": "lm_studio",
+            "embedding_model": "text-embedding-embeddinggemma-300m",
         },
     }
 
@@ -5299,12 +5325,7 @@ def providers_status_api(request: Request) -> dict[str, Any]:
             "deepseek": {"has_api_key": bool(creds["deepseek"]), "models": list(_catalog_model_ids("generation", "deepseek"))},
             "minimax": {"has_api_key": bool(creds["minimax"] or creds["minimax_global"]), "models": list(_catalog_model_ids("generation", "minimax"))},
         },
-        "embedding": {
-            "provider": EMBEDDING_PROVIDER,
-            "model": EMBED_MODEL,
-            "base_url": EMBEDDING_BASE_URL,
-            "dimension": EMBED_DIM,
-        },
+        "embedding": _embedding_runtime_status(),
     }
 
 
@@ -5337,16 +5358,18 @@ def providers_config_api(payload: OpenAICompatibleConfigRequest, request: Reques
 
 @app.get("/api/embedding/config")
 def embedding_config_status_api() -> dict[str, Any]:
+    runtime = _embedding_runtime_status()
     return {
         "status": "ok",
-        "provider": EMBEDDING_PROVIDER,
-        "model": EMBED_MODEL,
-        "base_url": EMBEDDING_BASE_URL,
-        "dimension": EMBED_DIM,
+        "provider": runtime["provider"],
+        "model": runtime["model"],
+        "base_url": runtime["base_url"],
+        "dimension": runtime["dimension"],
+        "fallback": runtime["fallback"],
         "options": [
             {"id": "gemini", "label": "Gemini", "default_model": "gemini-embedding-001"},
-            {"id": "lm_studio", "label": "LM Studio local", "default_model": "text-embedding-qwen3-embedding-0.6b"},
-            {"id": "openai_compatible", "label": "OpenAI-compatible", "default_model": "text-embedding-qwen3-embedding-0.6b"},
+            {"id": "lm_studio", "label": "EmbeddingGemma 300M (TEI Ubuntu)", "default_model": "text-embedding-embeddinggemma-300m"},
+            {"id": "openai_compatible", "label": "OpenAI-compatible", "default_model": "text-embedding-embeddinggemma-300m"},
             {"id": "openai", "label": "OpenAI", "default_model": "text-embedding-3-small"},
         ],
     }
@@ -5369,7 +5392,7 @@ def embedding_config_update_api(payload: EmbeddingConfigRequest, request: Reques
             provider,
             model=payload.model,
             base_url=payload.base_url,
-            api_key=None,
+            api_key=key or None,
         )
     except Exception as exc:
         _raise_api_error(exc)
@@ -5381,6 +5404,8 @@ def embedding_config_update_api(payload: EmbeddingConfigRequest, request: Reques
         }
         if result.get("base_url"):
             values["EMBEDDING_BASE_URL"] = str(result["base_url"])
+        if key:
+            values["EMBEDDING_API_KEY"] = key
         _upsert_env_values(values)
 
     return {"status": "ok", "saved": True, "persisted_env": bool(payload.persist_env), **result}
